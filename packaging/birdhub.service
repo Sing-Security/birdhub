@@ -1,0 +1,24 @@
+[Unit]
+Description=VISP Network Agent (Birdhub)
+After=network-online.target netbird.service
+Wants=network-online.target
+Requires=netbird.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/birdhub
+Restart=always
+RestartSec=5
+# Birdhub manipulates nftables and iproute2, so it requires root privileges.
+User=root
+Group=root
+
+# Hardening options
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,37 @@
+# Maintainer: LFAM Orbit <admin@lfam.us>
+pkgname=birdhub
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="VISP (Virtual ISP) Zero-Trust Overlay Network Agent"
+arch=('x86_64' 'aarch64')
+url="https://github.com/your-org/birdhub"
+license=('custom:Proprietary')
+depends=('netbird' 'shadowsocks-rust' 'nftables' 'iproute2')
+makedepends=('cargo')
+optdepends=('unbound: for split-horizon DNS routing'
+            'i2pd: for anonymous transparent routing')
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/your-org/birdhub/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP') # Replace with actual checksum when publishing
+
+build() {
+  cd "${pkgname}-${pkgver}"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --release --locked --all-features
+}
+
+package() {
+  cd "${pkgname}-${pkgver}"
+
+  # Install the main binary
+  install -Dm755 "target/release/${pkgname}" "${pkgdir}/usr/bin/${pkgname}"
+
+  # Install a default config file if provided (or placeholder)
+  install -Dm644 "config.toml" "${pkgdir}/etc/${pkgname}/config.toml"
+
+  # Install systemd service (Assuming you create one)
+  install -Dm644 "packaging/${pkgname}.service" "${pkgdir}/usr/lib/systemd/system/${pkgname}.service"
+
+  # Install the proprietary license
+  install -Dm644 "LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

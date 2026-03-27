@@ -1,0 +1,109 @@
+# ==============================================================================
+# VISP Network Agent Configuration
+# ==============================================================================
+# This file dictates the behavior of the VISP overlay network client.
+#
+# Architecture Golden Rule:
+# Identity = NetBird
+# Transport = Shadowsocks
+# Brain = This Agent
+# ==============================================================================
+
+[exit]
+# Exit Policy Mode.
+# Available modes: auto, netbird, latency, failover, load-balance, manual, geo
+mode = "auto"
+# Preferred primary region (used in 'failover' or 'manual' modes)
+primary = "us"
+# Backup region (used in 'failover' mode)
+secondary = "eu"
+
+[netbird]
+# NetBird acts as our Pure Identity Provider (IdP).
+# We query it to prove who we are before establishing Shadowsocks transport.
+socket_path = "/var/run/netbird/netbird.sock"
+timeout_ms = 5000
+# The internal split-horizon domain routed exclusively over the mesh
+internal_domain = "netbird.cloud"
+mesh_ip = "100.64.0.1"
+management_url = "https://api.netbird.io"
+# admin_api_token = "YOUR_ADMIN_API_TOKEN"
+# setup_key = "YOUR_SETUP_KEY"
+network_identifier = ""
+
+[dns]
+# DNS must ALWAYS match the active exit region to prevent geo-leaks.
+us_upstream = "1.1.1.1"
+eu_upstream = "9.9.9.9"
+local_port = 53
+flush_on_switch = true
+
+[watchdog]
+# Self-healing controller interval (in seconds)
+check_interval_secs = 30
+# If true, the agent strictly enforces nftables kill-switches on leak detection
+leak_protection_strict = true
+
+# ==============================================================================
+# Shadowsocks Exits (Transport Layer)
+# ==============================================================================
+# These define the regional exits available for transport. The agent will
+# dynamically manage local ss-local instances mapped to these configurations.
+
+[[shadowsocks]]
+region = "us"
+server_address = "us-exit.visp.network"
+server_port = 8388
+# In a true Zero-Trust flow, this password is a dynamic token derived from NetBird.
+# It is defined here as a fallback or placeholder for standard SS setups.
+password = "gateway-token-placeholder"
+method = "chacha20-ietf-poly1305"
+local_port = 1080
+mark = 101 # fwmark for iproute2 policy routing (us_exit table)
+
+[[shadowsocks]]
+region = "eu"
+server_address = "eu-exit.visp.network"
+server_port = 8388
+password = "gateway-token-placeholder"
+method = "chacha20-ietf-poly1305"
+local_port = 1081
+mark = 102 # fwmark for iproute2 policy routing (eu_exit table)
+
+# ==============================================================================
+# Deep Network Hubs (Distributed Cloud IPC)
+# ==============================================================================
+# Hubs are major mesh network junctions used to route deeper into the backend
+# infrastructure, enabling Distributed Cloud IPC capabilities.
+
+[[hubs]]
+name = "alpha-junction"
+address = "hub.alpha.visp.network"
+port = 8388
+is_primary = true
+
+[[hubs]]
+name = "beta-junction"
+address = "hub.beta.visp.network"
+port = 8388
+is_primary = false
+
+[[hubs]]
+name = "deep-ipc-gateway"
+address = "ipc.cloud.visp.network"
+port = 9000
+is_primary = false
+
+# ==============================================================================
+# I2P (The Invisible Internet Project)
+# ==============================================================================
+# Integrating I2P allows for military/journalist-grade anonymity.
+# The agent routes `.i2p` DNS requests and tunnels the traffic via the local I2P router.
+
+[i2p]
+enabled = true
+# Allow specifying an external I2P router IP (defaults to 127.0.0.1 if omitted)
+router_ip = "127.0.0.1"
+http_proxy_port = 4444
+socks_proxy_port = 4446
+sam_port = 7656

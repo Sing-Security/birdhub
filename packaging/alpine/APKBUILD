@@ -1,0 +1,38 @@
+# Contributor: VISP Engineering <admin@orbit.lfam.us>
+# Maintainer: VISP Engineering <admin@orbit.lfam.us>
+pkgname=birdhub
+pkgver=0.1.0
+pkgrel=0
+pkgdesc="Zero-Trust Virtual ISP agent and Hub control plane"
+url="https://orbit.lfam.us"
+arch="x86_64 aarch64"
+license="Proprietary"
+depends="nftables iproute2 shadowsocks-rust netbird"
+makedepends="cargo rust"
+source="$pkgname-$pkgver.tar.gz birdhub.initd"
+builddir="$srcdir/$pkgname-$pkgver"
+
+build() {
+	export CARGO_HOME="$srcdir/cargo"
+	cargo build --release --locked
+}
+
+check() {
+	export CARGO_HOME="$srcdir/cargo"
+	cargo test --release --locked
+}
+
+package() {
+	install -Dm755 target/release/$pkgname "$pkgdir"/usr/bin/$pkgname
+
+	# Create directory for configuration
+	install -d "$pkgdir"/etc/$pkgname
+
+	# Install default config if present
+	if [ -f "config.toml" ]; then
+		install -Dm644 config.toml "$pkgdir"/etc/$pkgname/config.toml
+	fi
+
+	# Install OpenRC init script
+	install -Dm755 "$srcdir"/birdhub.initd "$pkgdir"/etc/init.d/birdhub
+}
