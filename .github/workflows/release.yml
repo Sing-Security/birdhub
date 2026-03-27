@@ -19,11 +19,10 @@ jobs:
           # Fedora / Arch Linux / Standard Linux (glibc)
           - target: x86_64-unknown-linux-gnu
             cross: false
-          - target: aarch64-unknown-linux-gnu
-            cross: true
           # Alpine Linux (musl)
           - target: x86_64-unknown-linux-musl
             cross: true
+          # Alpine Linux ARM64 (musl)
           - target: aarch64-unknown-linux-musl
             cross: true
 
@@ -56,12 +55,15 @@ jobs:
           cd target/${{ matrix.target }}/release
           tar czvf ../../../birdhub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz birdhub
           cd ../../../
+          sha256sum birdhub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz > birdhub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: birdhub-${{ matrix.target }}
-          path: birdhub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          path: |
+            birdhub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            birdhub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
 
   release:
     name: Create GitHub Release
@@ -80,7 +82,7 @@ jobs:
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*.tar.gz
+          files: artifacts/*
           generate_release_notes: true
           draft: false
           prerelease: false
