@@ -24,7 +24,7 @@ segmented routing. It combines NetBird (Identity Provider & Mesh) with Shadowsoc
 It operates in Hub (Control Plane) or Client (Transparent OS Router) modes.
 
 %prep
-%autosetup -n %{name}-%{version}
+%autosetup -c -n %{name}-%{version}
 
 %build
 cargo build --release --locked
@@ -61,5 +61,5 @@ install -pm 644 packaging/%{name}.service %{buildroot}%{_unitdir}/%{name}.servic
 %{_unitdir}/%{name}.service
 
 %changelog
-* Thu Mar 27 2024 VISP Engineering <admin@orbit.lfam.us> - 0.1.0-1
+* Wed Mar 27 2024 VISP Engineering <admin@orbit.lfam.us> - 0.1.0-1
 - Initial package release for Fedora
