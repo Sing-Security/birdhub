@@ -1,9 +1,185 @@
-PROPRIETARY AND CONFIDENTIAL
+Open Infrastructure Protection License (OIPL) v1.0
+Copyright (c) 2026 BirdHub ASSET MANAGEMENT LLC. All Rights Reserved.
 
-Copyright (c) 2024 - All Rights Reserved
+This License governs the use, modification, and distribution of this Software and associated source code (the “Software”). By using, copying, modifying, or distributing the Software, you agree to the terms of this License.
 
-This codebase is proprietary and confidential. All rights are reserved pending formal consultation with a legal agent.
+--------------------------------------------------
+1. Definitions
+--------------------------------------------------
 
-Unauthorized copying, distribution, modification, reproduction, or use of this file or any part of this project, via any medium, is strictly prohibited without explicit, prior written permission from the owner.
+“Software” – The source code, binaries, libraries, tools, scripts, and documentation provided under this License.
 
-The code is provided "as is", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement. In no event shall the authors or copyright holders be liable for any claim, damages, or other liability, whether in an action of contract, tort, or otherwise, arising from, out of, or in connection with the software or the use or other dealings in the software.
+“Licensor” – BirdHub ASSET MANAGEMENT LLC and its subsidiaries.
+
+“You” – Any individual or entity using the Software.
+
+“Non-Commercial Use” – Personal use, academic research, security research, journalism, non-profit use, and open source development where no commercial advantage, revenue, or business use is derived.
+
+“Commercial Use” – Any use by a business, for-profit entity, government entity, contractor, or organization; any internal business use; SaaS; hosting; paid services; consulting; integration into a commercial product; or any use intended for commercial advantage.
+
+“Government Entity” – Any local, state, federal, or international government; military organization; law enforcement agency; intelligence organization; or government contractor.
+
+“Artificial Intelligence Systems” – Any machine learning, deep learning, neural network, large language model, or automated decision-making system.
+
+--------------------------------------------------
+2. License Grant (Non-Commercial)
+--------------------------------------------------
+
+Subject to the terms of this License, Licensor grants You a limited, worldwide, non-exclusive, non-transferable, revocable license to:
+
+- Use the Software for Non-Commercial Use
+- Modify the Software
+- Share the Software in open source projects (subject to Section 6)
+- Perform security research and audits
+- Use for educational purposes
+- Use for journalism and public interest research
+
+--------------------------------------------------
+3. Commercial Use Requires Separate License
+--------------------------------------------------
+
+You may NOT use the Software for Commercial Use without obtaining a separate Commercial License from Licensor.
+
+Commercial licenses may be obtained by contacting:
+info@lfam.us
+
+--------------------------------------------------
+4. Government Use Restriction
+--------------------------------------------------
+
+You may NOT use the Software if You are a Government Entity or acting on behalf of a Government Entity without explicit written permission from Licensor.
+
+This includes:
+- Military use
+- Law enforcement use
+- Intelligence or surveillance use
+- Government contractor use
+- Public sector deployments
+
+This restriction does not apply to Licensor and its subsidiaries.
+
+--------------------------------------------------
+5. Artificial Intelligence Restriction
+--------------------------------------------------
+
+You may NOT use the Software or any portion of its code, output, or architecture for:
+
+- Training Artificial Intelligence Systems
+- Fine-tuning AI models
+- Evaluating AI systems
+- Generating datasets for AI
+- Synthetic data generation
+- AI cleanroom implementations
+- Using the Software to benchmark AI systems
+- Using the Software in any AI pipeline not explicitly approved by Licensor
+- Using the Software to generate training data
+- Using the Software to improve machine learning models
+
+AI-related licenses must be obtained from Licensor.
+
+--------------------------------------------------
+6. Open Source Project Use Requirements
+--------------------------------------------------
+
+You may use this Software within an open source project ONLY if all of the following conditions are met:
+
+1. A copy of this License must be included in the repository.
+2. The repository must clearly disclose that it uses code from this Software.
+3. The repository README must include attribution.
+4. The project must include the phrase:
+
+   “Powered by BirdHub”
+
+5. Any files derived from this Software must retain this License header.
+6. Modifications to this Software must be documented.
+7. You may NOT relicense this Software under another license.
+8. You may NOT remove attribution.
+9. You may NOT incorporate this Software into a Commercial product.
+
+--------------------------------------------------
+7. No SaaS / Hosting Without License
+--------------------------------------------------
+
+You may NOT provide the Software as:
+
+- A hosted service
+- SaaS platform
+- API service
+- Cloud service
+- Remote access service
+- Managed service
+
+Where users access the functionality of the Software over a network for Commercial Use without a Commercial License.
+
+--------------------------------------------------
+8. Redistribution Restrictions
+--------------------------------------------------
+
+You may redistribute the Software only if:
+
+- This License is included
+- Attribution is provided
+- The Software is not sold
+- The Software is not relicensed
+- The Software is not included in a commercial product
+
+--------------------------------------------------
+9. Modifications
+--------------------------------------------------
+
+If You modify the Software:
+
+- You must document the changes
+- You must include a notice stating the Software has been modified
+- You must keep this License
+- You must disclose the use of this Software in your project
+
+--------------------------------------------------
+10. Ownership
+--------------------------------------------------
+
+The Software is licensed, not sold.
+Licensor retains all ownership, copyright, and intellectual property rights.
+
+--------------------------------------------------
+11. Termination
+--------------------------------------------------
+
+This License automatically terminates if You violate any of its terms.
+
+Upon termination, You must:
+
+- Stop using the Software
+- Delete all copies
+- Remove the Software from any projects
+- Cease distribution
+
+--------------------------------------------------
+12. No Warranty
+--------------------------------------------------
+
+The Software is provided “AS IS”, without warranty of any kind.
+
+--------------------------------------------------
+13. Limitation of Liability
+--------------------------------------------------
+
+Licensor shall not be liable for any damages arising from use of the Software.
+
+--------------------------------------------------
+14. Jurisdiction
+--------------------------------------------------
+
+This License shall be governed by the laws of:
+Columbus Ohio, United States of America
+
+--------------------------------------------------
+15. Commercial Licensing & Exceptions
+--------------------------------------------------
+
+Commercial licenses, AI licenses, and Government use exceptions are available from Licensor.
+
+Contact:
+info@lfam.us
+4652 US 68 SOUTH
+www.lfam.us
