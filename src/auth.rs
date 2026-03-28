@@ -6,9 +6,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct AuthToken {
-    pub password: String,
+    pub key: String,
     pub server_port: u16,
-    pub method: String,
 }
 
 // endregion: --- Types
@@ -29,7 +28,7 @@ impl AuthManager {
 /// Fetches dynamic credentials from the Hub's Control Plane API.
 /// This acts as the identity verification step where the Hub reads our NetBird IP
 /// and provisions an atomic Shadowsocks password if authorized.
-pub async fn fetch_hub_credentials(hub_api_url: &str) -> Result<AuthToken> {
+pub async fn _fetch_hub_credentials(hub_api_url: &str) -> Result<AuthToken> {
     let response = reqwest::get(hub_api_url)
         .await
         .map_err(|e| crate::Error::custom(format!("Failed to connect to Hub API: {}", e)))?;

@@ -5,7 +5,7 @@
 #
 # Architecture Golden Rule:
 # Identity = NetBird
-# Transport = Shadowsocks
+# Transport = Temper
 # Brain = This Agent
 # ==============================================================================
 
@@ -20,7 +20,7 @@ secondary = "eu"
 
 [netbird]
 # NetBird acts as our Pure Identity Provider (IdP).
-# We query it to prove who we are before establishing Shadowsocks transport.
+# We query it to prove who we are before establishing Temper transport.
 socket_path = "/var/run/netbird/netbird.sock"
 timeout_ms = 5000
 # The internal split-horizon domain routed exclusively over the mesh
@@ -45,28 +45,23 @@ check_interval_secs = 30
 leak_protection_strict = true
 
 # ==============================================================================
-# Shadowsocks Exits (Transport Layer)
+# Temper Exits (Transport Layer)
 # ==============================================================================
 # These define the regional exits available for transport. The agent will
-# dynamically manage local ss-local instances mapped to these configurations.
+# dynamically manage local temper instances mapped to these configurations.
 
-[[shadowsocks]]
-region = "us"
+[[transports]]
+name = "us"
 server_address = "us-exit.visp.network"
 server_port = 8388
-# In a true Zero-Trust flow, this password is a dynamic token derived from NetBird.
-# It is defined here as a fallback or placeholder for standard SS setups.
-password = "gateway-token-placeholder"
-method = "chacha20-ietf-poly1305"
+# In a true Zero-Trust flow, this key is a dynamic token derived from NetBird.
 local_port = 1080
 mark = 101 # fwmark for iproute2 policy routing (us_exit table)
 
-[[shadowsocks]]
-region = "eu"
+[[transports]]
+name = "eu"
 server_address = "eu-exit.visp.network"
 server_port = 8388
-password = "gateway-token-placeholder"
-method = "chacha20-ietf-poly1305"
 local_port = 1081
 mark = 102 # fwmark for iproute2 policy routing (eu_exit table)
 

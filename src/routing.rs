@@ -44,7 +44,9 @@ impl RouteManager {
                 crate::Error::custom(format!("Failed to execute ip route flush: {}", e))
             })?;
 
-        if !status.success() {
+        // If status is 2, it usually means the table is already empty/doesn't exist.
+        // We can safely ignore this during a reset.
+        if !status.success() && status.code() != Some(2) {
             return Err(crate::Error::custom(format!(
                 "ip route flush failed with status: {}",
                 status

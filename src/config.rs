@@ -132,7 +132,6 @@ pub struct TransportConfig {
     pub name: String,
     pub server_address: String,
     pub server_port: u16,
-    pub method: String,
     pub local_port: u16,
     pub mark: Option<u32>,
 }
@@ -179,6 +178,38 @@ impl Default for I2pConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubServerConfig {
+    #[serde(default = "default_hub_bind_address")]
+    pub bind_address: String,
+    #[serde(default = "default_hub_server_port")]
+    pub server_port: u16,
+    #[serde(default = "default_rotation_interval")]
+    pub rotation_interval_secs: u64,
+}
+
+fn default_hub_bind_address() -> String {
+    "0.0.0.0:8080".to_string()
+}
+
+fn default_hub_server_port() -> u16 {
+    8388
+}
+
+fn default_rotation_interval() -> u64 {
+    3600 // Default to 1 hour
+}
+
+impl Default for HubServerConfig {
+    fn default() -> Self {
+        Self {
+            bind_address: default_hub_bind_address(),
+            server_port: default_hub_server_port(),
+            rotation_interval_secs: default_rotation_interval(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     #[serde(default)]
@@ -197,6 +228,8 @@ pub struct AppConfig {
     pub watchdog: WatchdogConfig,
     #[serde(default)]
     pub i2p: I2pConfig,
+    #[serde(default)]
+    pub hub_server: HubServerConfig,
 }
 
 impl AppConfig {

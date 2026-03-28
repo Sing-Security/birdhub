@@ -1,0 +1,43 @@
+# ==============================================================================
+# VISP Client Configuration (Test Environment)
+# ==============================================================================
+
+[app]
+mode = "client"
+
+[exit]
+# Exit Policy Mode. In a test environment, we manually specify the Hub.
+mode = "manual"
+primary = "hub-test"
+
+[netbird]
+# Mock environment settings.
+# Identity is provided via the mock-netbird binary in /usr/local/bin.
+interface = "eth0"
+management_url = "http://hub-test:8080" # Pointing to the Hub's control plane
+internal_domain = "client.netbird.cloud"
+
+[dns]
+internal_zone = "netbird.cloud"
+nameserver_ip = "127.0.0.1"
+
+[watchdog]
+# Slower checks for lightweight container testing
+check_interval_secs = 60
+leak_protection_strict = false
+
+# ==============================================================================
+# Temper Exits (Transport Layer)
+# ==============================================================================
+
+[[transports]]
+name = "hub-test"
+# In Docker Compose, 'hub-test' resolves to the hub container's internal IP
+server_address = "hub-test"
+server_port = 8388
+local_port = 1080
+mark = 101 # fwmark for policy routing
+
+[i2p]
+# Disabled for basic networking tests
+enabled = false

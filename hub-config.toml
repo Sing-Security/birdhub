@@ -1,0 +1,27 @@
+# ==============================================================================
+# VISP Hub Configuration (Test Environment)
+# ==============================================================================
+
+[app]
+mode = "hub"
+
+[hub_server]
+# Address where the Control API (Axum) listens for auth requests
+bind_address = "0.0.0.0:8080"
+# Port where the Data Plane (Temper Transport) listens for client tunnels
+server_port = 8388
+# Master key rotation interval in seconds (Atomic swaps)
+rotation_interval_secs = 60
+
+[netbird]
+# Mock environment settings
+interface = "eth0"
+management_url = "http://localhost:1000"
+internal_domain = "hub.netbird.cloud"
+
+[dns]
+internal_zone = "netbird.cloud"
+nameserver_ip = "127.0.0.1"
+
+[watchdog]
+check_interval_secs = 60

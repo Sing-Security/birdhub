@@ -1,0 +1,90 @@
+[package]
+name = "temper"
+version = "0.1.0"
+edition = "2024"
+description = "Temper — Quantum-safe cryptographic protocol with hardened entropy and dual PQC signatures. Fully no_std for embedded."
+license = "Apache-2.0"
+repository = "https://github.com/Sing-Security/temper"
+keywords = ["cryptography", "post-quantum", "no-std", "embedded", "blake3"]
+categories = ["cryptography", "no-std"]
+
+[lib]
+doctest = false
+
+[features]
+default = ["std", "envelope"]
+std = ["alloc", "blake3/std", "hex/std", "compression"]
+alloc = []  # blake3/pure is now in dependencies section directly
+compression = ["dep:flate2"]
+signatures = ["dep:ml-dsa", "dep:slh-dsa"]
+
+# Performance features (std only - incompatible with bare-metal)
+blake3_simd = ["std", "blake3/neon", "blake3/prefer_intrinsics"]
+blake3_parallel = ["blake3_simd", "dep:rayon"]
+
+# Hybrid KEM/AEAD (optional, no_std + alloc compatible)
+envelope = ["signatures", "dep:ml-kem", "dep:x25519-dalek", "dep:chacha20poly1305"]
+
+# Hardware entropy example (optional, no_std compatible)
+hardware_example = []
+
+[dependencies]
+# -- Cryptography
+blake3 = { version = "1", default-features = false }
+ml-dsa = { version = "0.1.0-rc.7", default-features = false, features = ["zeroize"], optional = true }
+slh-dsa = { version = "0.2.0-rc.4", default-features = false, features = ["zeroize"], optional = true }
+
+# -- Hybrid KEM/AEAD (optional)
+ml-kem = { version = "0.2.2", default-features = false, features = ["zeroize"], optional = true }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"], optional = true }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"], optional = true }
+
+# -- DRBG
+rand_chacha = { version = "0.3", default-features = false }
+rand_core = { version = "0.6", default-features = false }
+
+# -- Entropy seeding
+getrandom = { version = "0.2", default-features = false, features = ["custom"] }
+
+# -- Serialization
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
+
+# -- Concurrency (no_std spinlock)
+spin = "0.9"
+
+# -- Encoding
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+
+# -- Secure memory
+zeroize = { version = "1", default-features = false }
+
+# -- Error handling (no_std compatible proc-macro)
+derive_more = { version = "2", default-features = false, features = ["from", "display"] }
+
+# -- Parallel processing (optional, std only)
+rayon = { version = "1.10", optional = true }
+
+[dev-dependencies]
+rand = "0.8"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Benchmarks
+[[bench]]
+name = "seal_bench"
+harness = false
+required-features = ["std"]
+
+# Examples
+[[example]]
+name = "seal_demo"
+required-features = ["std"]
+
+[[example]]
+name = "crypto_provider_demo"
+required-features = ["std"]
+
+[[example]]
+name = "kernel_chain_demo"
+required-features = ["std", "envelope"]

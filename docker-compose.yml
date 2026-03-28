@@ -1,0 +1,67 @@
+# ==============================================================================
+# VISP Network Agent: Docker Compose Test Environment
+# ==============================================================================
+# This environment orchestrates a full Identity (NetBird Mock) -> Transport (Temper)
+# -> Routing (Nftables) flow between a Hub and a Client container.
+#
+# Requirements:
+# - The containers require NET_ADMIN capability for nftables and routing.
+# - The mock-netbird.sh script provides simulated identity for the handshake.
+# ==============================================================================
+
+version: "3.8"
+
+services:
+  # --- VISP HUB (Server Node) ---
+  hub-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hub-test
+    hostname: hub-node
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - RUST_LOG=info
+      - NETBIRD_IP=100.64.0.1
+      - NETBIRD_HOSTNAME=hub.netbird.cloud
+    volumes:
+      - ./hub-config.toml:/etc/birdhub/config.toml:ro
+    networks:
+      visp-mesh:
+        ipv4_address: 100.64.0.10
+    ports:
+      - "8080:8080" # Control Plane (Auth API)
+      - "8388:8388" # Data Plane (Temper Transport)
+
+  # --- VISP CLIENT (End Node) ---
+  client-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: client-test
+    hostname: client-node
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - RUST_LOG=info
+      - NETBIRD_IP=100.64.0.2
+      - NETBIRD_HOSTNAME=client.netbird.cloud
+    volumes:
+      - ./client-config.toml:/etc/birdhub/config.toml:ro
+    networks:
+      visp-mesh:
+        ipv4_address: 100.64.0.20
+    depends_on:
+      - hub-test
+    # The client listens locally on 1080 for incoming unencrypted traffic
+    # to tunnel through the Temper transport to the Hub.
+    ports:
+      - "1080:1080"
+
+networks:
+  visp-mesh:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.0/16

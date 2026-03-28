@@ -1,0 +1,106 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║         VISP CRYPTOGRAPHIC TRANSPORT ARCHITECTURE (TEMPER)                  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ THE TEMPER PROTOCOL PHILOSOPHY                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+   VISP follows the Golden Rule of Zero-Trust Networking:
+   1. Identity  = NetBird (Peer Verification & Mesh Membership)
+   2. Transport = Temper (Post-Quantum Handshake & Streaming Encryption)
+   3. Brain     = Birdhub Agent (Routing, Policy & Enforcement)
+
+   Temper is a custom cryptographic transport designed specifically to replace
+   legacy proxy protocols. it provides identity-bound, forward-secure, and
+   post-quantum resilient tunnels for high-performance data transfer.
+
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 3-PHASE CRYPTOGRAPHIC HANDSHAKE (PQC)                                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+   Every connection begins with a mutually authenticated 3-phase handshake:
+
+   PHASE 1: HUB AUTHENTICATION (SEAL)
+   ├─ Hub generates ephemeral ML-KEM/X25519 keypair.
+   ├─ Hub signs the ephemeral public key using its long-term identity keys.
+   ├─ Signatures use a Dual-PQC approach: ML-DSA-65 and SLH-DSA.
+   └─ Client verifies the Seal to prove the Hub's long-term identity.
+
+   PHASE 2: SESSION ESTABLISHMENT (ENVELOPE)
+   ├─ Client generates a 32-byte master shared secret.
+   ├─ Client encapsulates secret using Hub's public key (ML-KEM-1024 + X25519).
+   ├─ Resulting "Envelope" is sent to the Hub.
+   └─ Hub decapsulates to retrieve the identical 32-byte secret.
+
+   PHASE 3: KEY DERIVATION (BLAKE3)
+   ├─ Both parties use the 32-byte secret to derive symmetric session keys.
+   ├─ Domain separation ensures distinct keys for each direction:
+   │  └─ C2H_KEY: BLAKE3_DERIVE("VISP.SESSION.C2H.V1", secret)
+   │  └─ H2C_KEY: BLAKE3_DERIVE("VISP.SESSION.H2C.V1", secret)
+   └─ Result: Two independent 32-byte keys for ChaCha20-Poly1305.
+
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ PACKET STRUCTURE & OBFUSCATION                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+   Temper packets are designed to evade Deep Packet Inspection (DPI) while
+   providing authenticated integrity and replay protection.
+
+   ┌────────────────────────────────────────────────────────────────┐
+   │ [Obfuscation Header (16-64 bytes, randomized)]                 │ DPI
+   ├────────────────────────────────────────────────────────────────┤ Evade
+   │ [Packet Header (23 bytes)]                                     │
+   │  ├─ Obfuscation size (1 byte, encoded)                         │
+   │  ├─ Key Version      (4 bytes, Little-Endian)                  │
+   │  ├─ Nonce            (16 bytes: 8B Seq + 8B Hash)              │
+   │  └─ Payload Length   (2 bytes, Little-Endian)                  │
+   ├────────────────────────────────────────────────────────────────┤
+   │ [HMAC (32 bytes)]                                              │ Auth
+   │  └─ BLAKE3 Keyed Hash of Header + Ciphertext                   │
+   ├────────────────────────────────────────────────────────────────┤
+   │ [Ciphertext (variable length + 16B Poly1305 Tag)]              │ Privacy
+   │  └─ ChaCha20-Poly1305 Authenticated Encryption                 │
+   └────────────────────────────────────────────────────────────────┘
+
+   Robust Parsing:
+   The receiver iterates backwards through potential obfuscation sizes,
+   validating that the encoded packet length matches the actual data received
+   to eliminate false-positive header detections.
+
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ LOCK-FREE KEY ROTATION (ARCSWAP)                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+   The Hub maintains a master key manager that rotates its underlying material
+   on a configurable atomic schedule (e.g., every 60 seconds).
+
+   ┌──────────────────────────────────────────────────────────┐
+   │ Master Key Store (ArcSwap<KeyMaterial>)                  │
+   │ ├─ Rotation happens in ~1 microsecond via atomic pointer │
+   │ ├─ Active sessions continue using their derived keys     │
+   │ └─ New connections fetch the latest master key version   │
+   └──────────────────────────────────────────────────────────┘
+
+   Benefits:
+   - High Availability: Zero throughput impact during rotation.
+   - Forward Secrecy: Compromise of an old master key cannot decrypt sessions
+     established after the rotation.
+   - Automatic Cleanup: Old key material is zeroized in memory as soon as the
+     last thread drops its reference.
+
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ SECURITY ENFORCEMENT                                                        │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+   - REPLAY PROTECTION: A sliding window bitmask tracks sequence numbers.
+     Old or duplicate packets are rejected before decryption.
+   - CONSTANT-TIME HMAC: Verification uses `subtle` to prevent timing attacks.
+   - IDENTITY BINDING: The transport `peer_id` is cryptographically bound to
+      the NetBird public key, preventing impersonation on the mesh.
+   - ZERO-STATE BASELINE: Routing tables and firewall rules are flushed and
+     re-applied atomically to ensure no leaks during configuration changes.

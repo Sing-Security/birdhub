@@ -2,9 +2,11 @@
 
 mod auth;
 mod config;
+mod crypto;
 mod dns;
 mod error;
 mod gateway;
+mod handshake;
 mod health;
 mod hub;
 mod i2p;
@@ -14,7 +16,8 @@ mod nft;
 mod policy;
 mod region;
 mod routing;
-mod shadowsocks;
+mod session;
+mod transport;
 mod watchdog;
 
 pub use error::{Error, Result};
@@ -55,9 +58,15 @@ async fn main() -> Result<()> {
     // -- 2. Check App Mode (Hub vs Client)
     if initial_config.app.mode == config::AppMode::Hub {
         println!("Starting in Hub mode...");
-        // In a real scenario, the bind address and port should come from the config.
-        // For demonstration, we bind the Control API to 0.0.0.0:8080 and the Shadowsocks server to 8388.
-        let hub_server = hub::Hub::new("0.0.0.0:8080", 8388);
+        let bind_addr = &initial_config.hub_server.bind_address;
+        let server_port = initial_config.hub_server.server_port;
+        let rotation_interval = initial_config.hub_server.rotation_interval_secs;
+        println!(
+            "Binding Control API to {} and VISP Data Plane to port {} (Rotation: {}s)",
+            bind_addr, server_port, rotation_interval
+        );
+
+        let hub_server = hub::Hub::new(bind_addr, server_port, rotation_interval).await?;
         hub_server.start().await?;
         return Ok(());
     }
@@ -97,26 +106,27 @@ async fn main() -> Result<()> {
         }
     }
 
-    // -- 7. Start Shadowsocks Transports
-    let ss_manager = Arc::new(shadowsocks::ShadowsocksManager::new());
+    // -- 7. Start Transports
     if initial_config.transports.is_empty() {
-        println!("No transports configured in config.toml. Skipping Shadowsocks start.");
+        println!("No transports configured in config.toml. Skipping transport start.");
     } else {
         for t in &initial_config.transports {
-            let ss_config = shadowsocks::ShadowsocksConfig {
+            let transport_config = transport::TransportConfig {
                 server_address: t.server_address.clone(),
                 server_port: t.server_port,
-                password: None, // Will fetch dynamically from the Hub Control API
-                method: t.method.clone(),
                 local_port: t.local_port,
                 mark: t.mark,
             };
 
-            if let Err(e) = ss_manager.start_tunnel(&ss_config).await {
-                eprintln!("Failed to start transport '{}': {}", t.name, e);
-            }
+            let transport_manager = Arc::new(transport::TransportManager::new(transport_config));
+            let transport_name = t.name.clone();
+            tokio::spawn(async move {
+                if let Err(e) = transport_manager.start_tunnel().await {
+                    eprintln!("Transport '{}' failed: {}", transport_name, e);
+                }
+            });
         }
-        println!("Shadowsocks transports started.");
+        println!("Transports started.");
     }
 
     // -- 8. Start Health Checks & Watchdog

@@ -6,7 +6,7 @@ pkgdesc="VISP (Virtual ISP) Zero-Trust Overlay Network Agent"
 arch=('x86_64' 'aarch64')
 url="https://github.com/your-org/birdhub"
 license=('custom:Proprietary')
-depends=('netbird' 'shadowsocks-rust' 'nftables' 'iproute2')
+depends=('netbird' 'nftables' 'iproute2')
 makedepends=('cargo')
 optdepends=('unbound: for split-horizon DNS routing'
             'i2pd: for anonymous transparent routing')

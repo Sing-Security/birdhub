@@ -13,7 +13,6 @@ BuildRequires:  systemd-rpm-macros
 
 Requires:       nftables
 Requires:       iproute
-Requires:       shadowsocks-rust
 # Netbird might not be in official repos, but we require it
 Requires:       netbird
 

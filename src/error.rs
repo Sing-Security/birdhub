@@ -1,5 +1,4 @@
 use derive_more::{Display, From};
-use shadowsocks::config::ServerConfigError;
 
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -9,11 +8,23 @@ pub enum Error {
     #[from(String, &String, &str)]
     Custom(String),
 
+    HandshakeFailed,
+    ReplayDetected,
+    HmacMismatch,
+    InvalidCipherKey,
+    EncryptionFailed,
+    DecryptionFailed,
+    InvalidHeader,
+    PacketTooShort,
+    InvalidObfuscationSize,
+
     // -- Externals
     #[from]
     Io(std::io::Error),
     #[from]
-    ShadowsocksConfig(ServerConfigError),
+    Postcard(postcard::Error),
+    #[from]
+    Temper(temper::Error),
 }
 
 // region:    --- Custom

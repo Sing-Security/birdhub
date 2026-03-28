@@ -1,7 +1,10 @@
+[workspace]
+members = [".", "crates/temper"]
+
 [package]
 name = "birdhub"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -25,18 +28,20 @@ bytes = "1"
 arc-swap = "1.9.0"
 crossbeam-utils = "0.8.21"
 toml = "1.1.0"
-shadowsocks-service = { version = "1.24.0", features = [
-    "trust-dns", "local", "server", "stream-cipher", "aead-cipher-extra", "aead-cipher-2022-extra",
-    "local-flow-stat", "local-tun", "manager", "security-replay-attack-detect", "local-dns",
-    "local-redir", "local-tunnel", "local-socks4", "local-http", "local-http-rustls",
-    "local-online-config", "local-fake-dns", "dns-over-https", "dns-over-tls", "dns-over-h3", "bson",
-    "brotli", "flate2", "zstd", "rocksdb", "rustls-native-certs", "webpki-roots",
-    "tokio-rustls", "http", "http-body-util", "httparse", "hyper", "mime",
-    "etherparse", "smoltcp", "hickory-dns", "hickory-resolver", "tun", "aead-cipher",
-    "aead-cipher-2022", "local-dns-relay",
-] }
-shadowsocks = "1.24.0"
 axum = "0.8.8"
 reqwest = { version = "0.13.2", features = ["json"] }
 dns-parser = "0.8.0"
 rand = "0.10.0"
+zeroize = { version = "1", features = ["derive"] }
+subtle = "2"
+blake3 = "1"
+heapless = "0.7"
+chacha20poly1305 = "0.10"
+postcard = { version = "1.0", features = ["alloc"] }
+
+# -- New internal and external dependencies
+temper = { path = "crates/temper" }
+socket2 = "0.5"
+tun = "0.8"
+tokio-util = { version = "0.7", features = ["full"] }
+rand_core = "0.10.0"
