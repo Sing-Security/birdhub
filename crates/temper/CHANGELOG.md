@@ -8,7 +8,9 @@ Versions before 0.5.0 were internal and were never published. Their entries are 
 below for lineage; treat them as history, not as release notes for anything you can
 depend on.
 
-## [Unreleased]
+## [0.5.0] - 2026-10-09
+
+First public release.
 
 ### Added
 

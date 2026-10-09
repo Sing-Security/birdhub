@@ -81,18 +81,22 @@ Both must verify for a seal to be valid
 
 ## Usage
 
+The crate publishes as **`temper-protocol`** (the `temper` name on crates.io is
+taken); the library it provides — and everything in these examples — is
+`temper`:
+
 ```toml
 # Minimal embedded (Cortex-M, RISC-V)
-temper = { version = "0.5", default-features = false, features = ["alloc"] }
+temper-protocol = { version = "0.5", default-features = false, features = ["alloc"] }
 
 # Embedded with hybrid envelope encryption
-temper = { version = "0.5", default-features = false, features = ["alloc", "envelope"] }
+temper-protocol = { version = "0.5", default-features = false, features = ["alloc", "envelope"] }
 
 # Server with SIMD-accelerated hashing
-temper = { version = "0.5", features = ["std", "blake3_simd"] }
+temper-protocol = { version = "0.5", features = ["std", "blake3_simd"] }
 
 # Encrypted TCP sessions (tokio): three-flight handshake + AEAD records
-temper = { version = "0.5", default-features = false, features = ["transport"] }
+temper-protocol = { version = "0.5", default-features = false, features = ["transport"] }
 ```
 
 ```rust

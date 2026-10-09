@@ -39,8 +39,10 @@ REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 VENDOR="$REPO_ROOT/crates/temper"
 
 # Tracked files, relative to the crate root. Anything not listed is
-# deliberately not vendored (benches, examples, rustfmt.toml, NOTICE, the
-# GitHub and contribution docs).
+# deliberately not vendored (benches, examples, rustfmt.toml, the GitHub
+# and contribution docs). NOTICE is vendored on purpose: temper is
+# Apache-2.0, and its NOTICE file carries the attribution notices a
+# redistributor must keep readable — this repository is one.
 FILES=(
 	src
 	Cargo.toml
@@ -48,6 +50,7 @@ FILES=(
 	CHANGELOG.md
 	PROTOCOL.md
 	LICENSE
+	NOTICE
 )
 
 FROM=""

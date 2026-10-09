@@ -545,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "birdhub"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "axum",
  "derive_more",
@@ -563,7 +563,7 @@ dependencies = [
 
 [[package]]
 name = "birdhub-console"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "birdhub",
  "eframe",

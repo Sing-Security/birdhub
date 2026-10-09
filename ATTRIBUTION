@@ -1,4 +1,11 @@
-This project uses technology from BirdHub developed by Sing Security, a subsidary of L&F ASSET MANAGEMENT LLC.
+This project uses technology from BirdHub developed by Sing Security, a subsidiary of L&F ASSET MANAGEMENT LLC.
 
-Source: https://github.com/birdhub
+Source: https://github.com/Sing-Security/birdhub
 Licensed under the Open Infrastructure Protection License (OIPL).
+
+## Temper
+
+`crates/temper` is the Temper post-quantum protocol library
+(https://github.com/Sing-Security/temper), distributed here under the
+Apache License, Version 2.0, Copyright 2026 Sing-Security. Its NOTICE file
+ships with it in this repository and in every release tarball.

@@ -5,7 +5,9 @@ set -e
 # Requirements: rust, tar, sha256sum; `cross` for the foreign targets.
 #
 # Each artifact is a directory tarball: the binaries plus the configs,
-# LICENSE and README a new operator needs. The desktop console rides in the
+# LICENSE, ATTRIBUTION and README a new operator needs — the license terms
+# and the vendored temper's Apache notices ride with every distributed
+# binary, not only with the source. The desktop console rides in the
 # native GNU tarball — the headless binary is what servers get.
 
 VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
@@ -51,7 +53,7 @@ for TARGET in "${TARGETS[@]}"; do
     if [ -f "target/$TARGET/release/birdhub-console" ]; then
         cp "target/$TARGET/release/birdhub-console" "$STAGE/bin/"
     fi
-    cp LICENSE README.md "$STAGE/"
+    cp LICENSE README.md ATTRIBUTION "$STAGE/"
     cp hub-config.toml client-config.toml "$STAGE/"
 
     TAR_NAME="$PACKAGE_NAME-v$VERSION-$TARGET.tar.gz"
