@@ -1,5 +1,8 @@
 [package]
-name = "temper"
+# Publishes as temper-rs: crates.io's `temper` belongs to an unrelated
+# project. The library target below keeps the name `temper`, so the rename
+# never leaks past the manifest.
+name = "temper-rs"
 version = "0.5.0"
 edition = "2024"
 rust-version = "1.89"
@@ -11,6 +14,7 @@ keywords = ["cryptography", "post-quantum", "no-std", "embedded", "blake3"]
 categories = ["cryptography", "no-std"]
 
 [lib]
+name = "temper"
 doctest = false
 
 [lints.rust]

@@ -32,7 +32,7 @@ serde_json = "1"
 # -- than a path dependency into CrucibleOS so the Docker build context is this
 # -- repository alone. `scripts/sync-temper.sh` refreshes it from the source
 # -- of truth and `--check` fails when they have drifted.
-temper = { path = "crates/temper", features = ["transport"] }
+temper-rs = { path = "crates/temper", features = ["transport"] }
 
 [dev-dependencies]
 # Route-level API tests send requests through the real router with `oneshot`,

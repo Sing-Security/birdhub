@@ -555,7 +555,7 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "serde_json",
- "temper",
+ "temper-rs",
  "tokio",
  "toml",
  "tower",
@@ -4360,7 +4360,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "temper"
+name = "temper-rs"
 version = "0.5.0"
 dependencies = [
  "blake3",
