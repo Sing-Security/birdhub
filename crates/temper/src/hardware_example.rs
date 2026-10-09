@@ -52,9 +52,6 @@
 //! let mut entropy = TemperEntropy::from_sources(&mut [&mut hw_rng])?;
 //! ```
 
-#[cfg(feature = "alloc")]
-use alloc::string::String;
-
 use crate::entropy_source::{EntropyError, EntropySource};
 
 /// Example hardware TRNG entropy source.
@@ -195,38 +192,49 @@ impl EntropySource for HardwareTrng {
 	}
 }
 
+// region:    --- Tests
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use alloc::boxed::Box;
+	use alloc::string::ToString;
+
+	type Result<T> = core::result::Result<T, Box<dyn core::error::Error>>; // For tests.
 
 	#[test]
-	fn test_hardware_trng_basic() {
+	fn test_hardware_example_trng_basic() -> Result<()> {
+		// -- Setup & Fixtures
 		let mut hw_rng = HardwareTrng::new();
 
+		// -- Exec
+		let mut buf = [0u8; 32];
+		let n = hw_rng.fill_entropy(&mut buf).map_err(|e| e.to_string())?;
+
+		// -- Check
 		assert!(hw_rng.is_available());
 		assert_eq!(hw_rng.name(), "Hardware-TRNG-Example");
-
-		let mut buf = [0u8; 32];
-		let result = hw_rng.fill_entropy(&mut buf);
-		assert!(result.is_ok());
-		assert_eq!(result.unwrap(), 32);
+		assert_eq!(n, 32);
+		Ok(())
 	}
 
 	#[test]
-	fn test_hardware_trng_with_entropy() {
+	fn test_hardware_example_trng_with_entropy() -> Result<()> {
+		// -- Setup & Fixtures
 		use crate::TemperEntropy;
 		use rand_core::RngCore;
 
 		let mut hw_rng = HardwareTrng::new();
-		let entropy_result = TemperEntropy::from_sources(&mut [&mut hw_rng]);
 
-		// Should succeed with hardware source
-		assert!(entropy_result.is_ok());
+		// -- Exec
+		let mut rng = TemperEntropy::from_sources(&mut [&mut hw_rng])?;
 
-		let mut rng = entropy_result.unwrap();
-
+		// -- Check
 		// Should be able to generate random numbers
 		let random_u64 = rng.next_u64();
 		assert_ne!(random_u64, 0); // Basic sanity check
+		Ok(())
 	}
 }
+
+// endregion: --- Tests

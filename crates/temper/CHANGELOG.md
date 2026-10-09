@@ -1,184 +1,195 @@
 # Changelog
 
-All notable changes to the Temper cryptographic protocol crate will be documented in this file.
+Notable changes to Temper. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Versions before 0.5.0 were internal and were never published. Their entries are kept
+below for lineage; treat them as history, not as release notes for anything you can
+depend on.
 
 ## [Unreleased]
 
 ### Added
 
-- **BLAKE3 SIMD acceleration** (`blake3_simd` feature): Enables hardware SIMD intrinsics (NEON on ARM, AVX2/AVX512 on x86) for faster hashing on std builds
-- **Parallel BLAKE3 hashing** (`blake3_parallel` feature): Rayon-based parallel hashing for content >= 1 MiB, reduces hashing time for large files
-- **Hardware entropy example** (`hardware_example` feature): Demonstrates integration pattern for hardware TRNGs (STM32, ESP32, nRF52, etc.)
-- **Performance benchmarks**: Criterion-based microbenchmarks for seal creation/verification across multiple content sizes (1KB - 10MB)
-- **Build profiles**: 
-  - `release-server`: Speed-optimized profile for server deployments (opt-level=3, lto=thin)
-  - `bench`: Benchmark-specific profile for accurate performance measurements
-- **Binary size analysis guide**: Comprehensive `BINARY_SIZE_GUIDE.md` with cargo-bloat usage, CI integration, and target recommendations
-- **Additional tests**:
-  - `test_seal_id_streaming_no_allocation`: Verifies streaming seal_id computation without intermediate clones
-  - `test_content_hash_deterministic`: Validates deterministic hashing across different content sizes
+- **Session protocol** (`session` feature) — the three flights with both peers'
+  identities concealed from a non-participant observer, the bare handshake's
+  `local_id` blinded with fresh randomness instead of a deterministic identity
+  digest, and an optional stateless anti-DoS cookie. Specified in `PROTOCOL.md`,
+  including what the protocol does **not** provide.
+- **`session`** — `initiate` / `accept` / `finalize_initiator` /
+  `finalize_responder`, the `SessionInit` / `SessionAccept` wire types, and the
+  `SessionChallenge` flight-0 type. The initiator's identity is sealed to the
+  responder's concealment key; the responder's is sealed under a key derived
+  from the session secret and the transcript through the acceptance.
+- **`session_cookie`** (`session` feature) — `SessionCookie`, a stateless
+  `BLAKE3.keyed_hash(server_secret, peer_tag || time_bucket)` cookie issuer and
+  verifier that accepts the current and previous bucket. Separate from
+  `session` for the same reason `replay` is: it needs a carrier-supplied peer
+  tag and a clock, and the handshake is a pure state machine with neither.
+- **`envelope::ConcealmentKeypair` / `ConcealmentPublicKey`** — the long-term
+  key an initiator seals to. Only the public half is serializable, so the
+  secret cannot reach the wire through the type that names it. Plus
+  `envelope::aead_seal` / `aead_open`, a raw-key ChaCha20-Poly1305 with AAD and
+  a single-use all-zero nonce, for sealing an identity under a key both sides
+  already hold.
+- **`session::peek_version`** — read the version field a flight 1 declares,
+  decoding a `u16` rather than assuming a raw byte.
+- **`transport`** — `Session::initiate` / `Session::accept`,
+  `Listener::accept`, `connect`, `ResponderConfig`, and `peer_tag_from_addr`.
+  The client handles the cookie challenge internally, restarting flight 1
+  with the cookie and permitting exactly one such round.
 
 ### Changed
 
-- **Parallel hash threshold**: Content >= 1 MiB triggers parallel hashing when `blake3_parallel` is enabled (256 KiB chunks)
-- **Documentation**: Expanded README with feature flag matrix and usage examples for different deployment scenarios
-
-### Optimized
-
-- **Streaming seal_id computation**: Eliminates ~22 KB of heap allocations by directly hashing seal components instead of cloning and serializing entire Seal structure (already in v0.2.0, now tested)
-- **Pre-sized buffer allocations**: All binding constructions use `Vec::with_capacity()` to eliminate reallocation (already in v0.2.0, now verified)
-
-### Internal
-
-- Test suite expanded from 14 to 16 tests
-- All feature combinations verified: `alloc`, `std`, `blake3_simd`, `blake3_parallel`, `hardware_example`
-
-## [0.2.0] - 2024-XX-XX (Previous Release)
-
-### Changed - Breaking
-
-- **Wire format**: Seal binding construction changed from JSON to binary (serde_json → postcard)
-  - Breaking change: v0.1.0 seals will NOT verify with v0.2.0 and vice versa
-  - Migration: Re-seal existing content with v0.2.0
-
-### Added
-
-- Postcard binary serialization for compact encoding (~60-70% smaller than JSON)
-- Pre-sized vector allocations in seal operations
-- Streaming seal_id computation (no intermediate clones)
-- Inline hints for crypto wrapper functions
-- Optimized release profile for embedded (opt-level=s, LTO, strip)
-
-### Optimized
-
-- **Heap allocation reduction**: 99% reduction in seal creation path (~33 KB → ~0.4 KB)
-- **Binary size reduction**: 20-30% smaller for embedded deployments
-- **Performance improvement**: 15-25% faster seal operations
+- **`ca`** — certificate content schema 2: a `TemperCertificate` now also signs
+  the subject's **concealment public key** (`ConcealmentBinding`), and its wire
+  encoding changes accordingly. The concealment key is what an initiator
+  KEM-encapsulates flight 1 to, so certifying it is what makes a first contact
+  authenticated end to end — a schema-1 certificate leaves the initiator taking
+  that key on faith, and a substituted key opens the sealed identity without
+  completing the handshake. Schema-1 certificates do not verify under this
+  build (domain `Temper.CA.Cert.v2`); none were ever issued outside tests.
+  `issue_certificate` now takes the subject's keys as one `SubjectKeys` value
+  rather than as separate arguments.
 
 ### Security
 
-- Zero `.unwrap()` in production code
-- All errors return through `Result` types
-- `panic = "abort"` for embedded safety
+- The flight-1 seal is **not forward-secret**: it is sealed to the responder's
+  static concealment key, so an adversary who records flight 1 and later
+  compromises that key recovers the initiator's identity. The responder's side
+  is forward-secret.
+- The version field is not authenticated, so it selects a code path rather than
+  a trust level. This build speaks one version and rejects any other; a future
+  breaking change would be negotiated through it, and a responder answering
+  more than one version would reintroduce a downgrade surface. Stated in
+  `PROTOCOL.md` rather than mitigated.
 
-## [0.1.0] - Initial Internal Release
+## [0.5.0] — 2026-10-09
+
+First public release. Everything below the `0.1.0` heading existed before this, in
+various internal states; this is the first snapshot published as a crate.
 
 ### Added
 
-- Core entropy generation with multi-source pooling (OS, jitter, process)
-- ChaCha20 DRBG with automatic re-seeding every 2²⁰ bytes
-- Dual PQC signature protocol (ML-DSA-65 + SLH-DSA-SHA2-128s)
-- Full `no_std` + `alloc` compatibility
-- BLAKE3 content-addressed seal IDs
-- Statistical test suite (chi-squared, autocorrelation, avalanche, bit balance)
-- Domain separation for all cryptographic operations
-- Thread-safe entropy state with spin::Mutex
+- **`handshake`** — ephemeral two-party key agreement over ML-KEM-1024 + X25519,
+  deriving a shared 32-byte session key via `BLAKE3.derive_key("Temper.Handshake.v1", …)`.
+  Provides forward secrecy; unauthenticated on its own — the `session` protocol
+  below is the authenticated wrapper.
+- **`session`** — a mutually authenticated session protocol on top of `handshake`
+  (`session` feature): three postcard flights, dual ML-DSA-65 + SLH-DSA transcript
+  signatures on both sides, keyed confirm MACs proving both parties derived the
+  shared secret, mandatory client authentication, and peer policy (accept-any,
+  pinning, or CA certificates). Directional record keys and the wire format, key
+  schedule, and threat model are specified in `PROTOCOL.md`.
+- **`record`** (`session` feature) — directional AEAD record keys over
+  ChaCha20-Poly1305: counter nonces with the sequence never on the wire, strict
+  ordering for streams, and an explicit-sequence pair (`seal_at`/`open_at`) for
+  datagram carriers that window on their own. Keys ratchet every 2²⁰ records on
+  a one-way BLAKE3 chain, so a key recovered from memory decrypts neither the
+  records before it nor the records after it. `seal_padded`/`open_padded` add
+  opt-in length quantization.
+- **`replay`** (`session` feature) — `SessionReplayGuard`, a bounded
+  time-windowed record of accepted `session_id`s, for the responder half of the
+  protocol. `transport::Listener` owns one and consults it before computing
+  flight 2.
+- **`transport`** — length-prefixed framing over tokio with a TCP client/server
+  that runs the three session flights and then moves one encrypted record per
+  frame. A pre-release plaintext `Session` (with its `session_key()` accessor)
+  was replaced rather than shipped.
+- **`keychain`** — BLAKE3-derived key hierarchy seeded from a process root key.
+  Host-platform integration, not general-purpose API.
+- **`crypto_provider`** — pluggable backend for the PQC primitives, with a CPU
+  implementation registered by default and `set_crypto_provider` to replace it.
+- **`ca`** — certificate authority built on the seal primitives, with
+  `TemperCertificate::check_validity` for both ends of the validity window.
+- **`envelope`** — ML-KEM-1024 + X25519 hybrid KEM with ChaCha20-Poly1305 AEAD.
+- **`blake3_simd`**, **`blake3_parallel`** — SIMD and Rayon-backed hashing (std only).
+- **`hardware_example`** — hardware TRNG integration template.
+- **`crucible-user-getrandom`** — routes `getrandom` to a host syscall instead of the
+  zero-fill bare-metal fallback.
+- **`release-server` and `bench` build profiles**, plus a size-first `release` profile.
+- **`BINARY_SIZE_GUIDE.md`**, `SECURITY.md`, `CONTRIBUTING.md`, `LICENSE`, `NOTICE`.
+- **CI** covering the full feature matrix, `cargo fmt --check`, and `clippy -D warnings`.
+
+### Changed
+
+- Version aligned to **0.5.0**. The manifest said `0.1.0` while the README and
+  internal documents described the crate as v0.5 — the manifest was the outlier.
+- Crate renamed `forgecore-temper` → `temper`, matching the repository and the brand.
+- README rewritten for external readers: current module surface, an accurate
+  algorithm table, a deduplicated feature-flag section, and an integration section
+  for the host-specific features.
+
+### Fixed
+
+- **Corrected the SLH-DSA claims.** The source comments and every document named
+  `SLH-DSA-SHA2-128s` and advertised **NIST Level 5**. The implementation has always
+  used `Sha2_128f`, which is **Category 1** — the category follows the parameter
+  number (128/192/256 → 1/3/5), not the variant. Signatures are 17,088 bytes, not the
+  ~7,856 bytes the `s` variant would give. The public documentation overstated the
+  security level of one of the two signatures.
+- **Reconciled the stated test count.** README claimed 27 tests, the CHANGELOG
+  claimed 16; both numbers were invented, and the real suite was several times
+  either figure at the audit (it is larger still after the additions above —
+  see the CI matrix for the per-feature counts).
+- **Declared the build profiles.** README, CHANGELOG and `BINARY_SIZE_GUIDE.md` all
+  documented `[profile.release-server]` and `[profile.bench]`, and cited benchmark
+  numbers produced under them, but no `[profile.*]` section existed — the documented
+  `cargo build --profile release-server` command failed.
+
+### Removed
+
+- **`plugins`.** A module named for dynamically loading crypto providers from
+  shared libraries, whose `load_provider` returned an error unconditionally and
+  whose `discover_providers` returned an empty vector — with two tests whose only
+  job was to pin that inaction. A public symbol named `load_provider` that can
+  never load a provider reads as a capability and is not one. Static providers via
+  `set_crypto_provider` remain the supported path.
+- **`encrypt` and `decrypt`.** Two public functions at the crate root that returned
+  their input unchanged. Nothing called them and nothing documented them; a
+  cryptography crate must not export a function named `encrypt` that hands back
+  plaintext. Use the `envelope` API.
+- Internal work-log documents (`IMPLEMENTATION_SUMMARY.md`,
+  `INTEGRATION_SUMMARY.md`, `PERFORMANCE_OPTIMIZATIONS.md`,
+  `CRYPTO_PROVIDER_ARCHITECTURE.md`) and the `.github/` AI-assistant instruction
+  files. All were stale — several described the PQC primitives as unimplemented
+  `todo!()` stubs, invented a file tree that does not exist, and named algorithms the
+  code does not use.
+
+## [0.2.0] — date not recorded
+
+### Changed — Breaking
+
+- **Wire format**: seal binding construction moved from JSON to postcard binary.
+  Seals created by 0.1.0 do not verify under 0.2.0, or vice versa. Migration:
+  re-seal existing content.
+
+### Added
+
+- Postcard binary serialization (~60–70% smaller than JSON).
+- Pre-sized vector allocations in seal operations.
+- Streaming `seal_id` computation, eliminating intermediate clones.
+
+### Optimized
+
+- Heap allocation in the seal creation path reduced from ~33 KB to ~0.4 KB.
+- Binary size reduced 20–30% for embedded targets.
+
+## [0.1.0] — initial internal release
+
+### Added
+
+- Multi-source entropy pooling (OS, jitter, process) mixed through BLAKE3.
+- ChaCha20 DRBG with automatic reseeding.
+- Dual PQC signature protocol (ML-DSA-65 + SLH-DSA).
+- `no_std` + `alloc` support throughout.
+- BLAKE3 content-addressed seal IDs and domain separation for all operations.
+- Statistical entropy test suite — chi-squared, autocorrelation, avalanche, bit balance.
 
 ### Security
 
-- Quantum-resistant signatures (NIST FIPS 204 + FIPS 205)
-- Defense-in-depth: Both ML-DSA and SLH-DSA must be broken to forge seals
-- Forward secrecy through automatic re-seeding
-- Zeroization of sensitive key material
-
----
-
-## Feature Flag Changelog
-
-### Current Features
-
-| Feature | Status | Target | Description |
-|---------|--------|--------|-------------|
-| `alloc` | Stable | Both | Heap allocation support (required) |
-| `std` | Default | Desktop | Standard library support |
-| `blake3_simd` | New | Desktop | BLAKE3 SIMD acceleration |
-| `blake3_parallel` | New | Server | Rayon parallel hashing |
-| `hardware_example` | New | Embedded | Hardware TRNG integration example |
-
-### Deprecated Features
-
-None
-
-### Removed Features
-
-None
-
----
-
-## Migration Guides
-
-### v0.1.0 → v0.2.0
-
-**Breaking Change**: Wire format changed from JSON to postcard binary encoding.
-
-**Action Required**:
-1. New deployments: Use v0.2.0 (no migration needed)
-2. Existing seals: Re-seal all content with v0.2.0
-3. Backward compatibility: Maintain both versions during transition if needed
-
-**API Compatibility**: All public APIs unchanged (`generate_keypair`, `create_seal`, `verify_seal`)
-
-### v0.2.0 → Unreleased
-
-**Non-Breaking**: All changes are additive (new features, optimizations).
-
-**Action Required**: None
-
-**Recommended**:
-- Add `blake3_simd` feature for desktop builds
-- Add `blake3_parallel` feature for server builds with large content
-- Review `BINARY_SIZE_GUIDE.md` for embedded deployments
-- Run benchmarks to validate performance improvements
-
----
-
-## Performance Metrics
-
-### Seal Operations (Approximate)
-
-| Operation | v0.1.0 | v0.2.0 | Unreleased (w/ SIMD) | Improvement |
-|-----------|--------|--------|----------------------|-------------|
-| create_seal (1KB) | 12 ms | 10 ms | 9 ms | 25% |
-| create_seal (1MB) | 15 ms | 13 ms | 11 ms | 27% |
-| verify_seal (1KB) | 8 ms | 7 ms | 6 ms | 25% |
-| verify_seal (1MB) | 11 ms | 10 ms | 8 ms | 27% |
-
-*Note: Benchmarks run on Intel i7-12700K @ 3.6 GHz, Linux 6.5*
-
-### Binary Size (Embedded)
-
-| Target | v0.1.0 | v0.2.0 | Unreleased | Change |
-|--------|--------|--------|------------|--------|
-| Cortex-M4F (alloc only) | ~160 KB | ~120 KB | ~120 KB | -25% |
-| RISC-V RV32IMC (alloc only) | ~155 KB | ~118 KB | ~118 KB | -24% |
-
----
-
-## Security Advisories
-
-None
-
----
-
-## Credits
-
-### Contributors
-
-- Sing-Security core team
-
-### Dependencies
-
-- `blake3`: Fast cryptographic hashing
-- `ml-dsa`: NIST FIPS 204 Module-Lattice-Based Digital Signatures
-- `slh-dsa`: NIST FIPS 205 Stateless Hash-Based Digital Signatures
-- `rand_chacha`: ChaCha20 DRBG implementation
-- `postcard`: no_std binary serialization
-- `rayon`: Parallel processing (optional, std only)
-- `criterion`: Benchmarking framework (dev dependency)
-
----
-
-**For security disclosures, contact Sing-Security directly.**
+- Quantum-resistant signatures (FIPS 204 + FIPS 205); both must be broken to forge
+  a seal.
+- Forward secrecy through automatic reseeding.
+- Zeroization of key material.

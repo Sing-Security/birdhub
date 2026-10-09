@@ -1,351 +1,509 @@
 // ============================================================================
-// HUB MODULE: VISP Server-Side Implementation
+// HUB MODULE: the relay's server end
 // ============================================================================
 //
-// Orchestrates the server-side logic for the VISP transport protocol. It manages
-// the cryptographic handshake, session establishment, and data streaming for
-// all incoming client connections.
+// One listener — the data plane — one session per client, and two questions
+// asked of every session:
+//
+//   1. *Who is this?* Answered by the handshake itself: `PeerPolicy::Cert`
+//      refuses any peer that does not present a certificate chaining to the
+//      fleet CA, for a covered name, inside its validity window. Failure
+//      costs the caller a cookie verification before anything expensive runs.
+//   2. *What may they dial?* Answered by the grant table, keyed by the
+//      certificate's subject id. No grant, no session; a grant lists exact
+//      `host:port` targets and nothing else, so the hub's network position is
+//      reachable only along the paths an operator wrote down. The answer is
+//      applied per stream, before the dial, for every conversation the
+//      session opens — not once for the session.
+//
+// The old build had a third surface — an unauthenticated `/auth` endpoint
+// that handed out the concealment key so a stranger could start a handshake —
+// and an `allowed_key_ids` list whose empty default admitted everyone. Both
+// are gone: the certificate file replaced the first, and "no grant" denying
+// replaced the second. This module no longer speaks HTTP at all.
 
-// region: --- Imports
-use crate::crypto::{self, TemperKeyManager};
-use crate::error::{Error, Result};
-use crate::handshake::{self, ClientHandshake, SessionKeys};
-use crate::netbird::NetbirdManager;
-use crate::session::{self, StreamSession};
-use crate::transport::{read_message, write_message};
-use axum::{
-    extract::{ConnectInfo, State},
-    routing::get,
-    Json, Router,
-};
-use serde::Serialize;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use temper::{
-    envelope,
-    seal::{self, TemperKeypair},
-    TemperEntropy,
-};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{sleep, Duration};
-// endregion: --- Imports
+use crate::ca::{self, CaPublicKeys};
+use crate::config::{AppConfig, GrantConfig, HubServerConfig};
+use crate::error::Result;
+use crate::events::{EventLog, Kind};
+use crate::identity::{check_certificate_matches_identity, Identity};
+use crate::mux::Mux;
+use crate::registry::PeerRegistry;
+use crate::relay;
+use crate::time::now_secs;
+use std::collections::BTreeMap;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex, RwLock};
+use temper::ca::TemperCertificate;
+use temper::transport::{Listener, ResponderConfig};
+use temper::{CertValidity, PeerPolicy, SessionCookie, TemperEntropy};
 
-// region: --- Types
+// region:    --- Types
 
-/// The response from the `/auth` endpoint, providing the hub's connection port and identity.
-#[derive(Serialize)]
-pub struct AuthResponse {
-    pub server_port: u16,
-    /// The hub's NetBird public key for peer identity binding
-    pub hub_netbird_pubkey: String,
-    /// The hub's hostname for verification
-    pub hub_hostname: String,
+/// One live session with the hub, as the fleet view sees it.
+pub struct SessionInfo {
+    pub session_id: u64,
+    /// The certificate subject — the name the grant table is keyed by.
+    pub subject: String,
+    pub key_id: String,
+    /// The certificate presented at the handshake: what the inspector shows
+    /// in full, and where its validity window lives.
+    pub certificate: TemperCertificate,
+    pub since_unix: u64,
+    /// Conversations open right now. A stream is one local connection on the
+    /// client's side, so this is what "busy" looks like from here.
+    pub streams_open: AtomicU64,
+    /// The operator's off switch, set by `run_hub` once the session's mux
+    /// exists. `None` only in the sliver between the board entry being made
+    /// and the relay task running.
+    mux: Mutex<Option<Mux>>,
 }
 
-/// The shared state for the Axum control plane.
-#[derive(Clone)]
-pub struct HubState {
-    pub server_port: u16,
-    pub _key_manager: Arc<TemperKeyManager>,
-    pub _hub_netbird_pubkey: String,
+impl SessionInfo {
+    /// End the whole session: the mux driver drops the socket, every stream
+    /// ends, and the peer sees the hub hang up — after which it reconnects
+    /// and is subject to whatever the roster says *now*. `false` when the
+    /// relay task has not published its mux yet; the kicker says "try again
+    /// in a moment" rather than pretending it did something.
+    pub fn kick(&self) -> bool {
+        let Some(mux) = self.mux.lock().expect("session mux lock").clone() else {
+            return false;
+        };
+        mux.shutdown();
+        true
+    }
+
+    /// The relay task's first act: publish the mux the kicker uses.
+    pub(crate) fn set_mux(&self, mux: Mux) {
+        *self.mux.lock().expect("session mux lock") = Some(mux);
+    }
 }
 
-/// The main Hub server structure.
-pub struct Hub {
-    bind_addr: String,
-    server_port: u16,
-    rotation_interval_secs: u64,
-    key_manager: Arc<TemperKeyManager>,
-    /// The Hub's long-term identity keypair, used for signing Seals.
-    signing_keypair: TemperKeypair,
-    /// The Hub's NetBird public key for identity binding.
-    hub_netbird_pubkey: String,
+/// The hub's live sessions, by session id.
+///
+/// Keyed by session id rather than by subject even though there is one
+/// session per subject in practice: the id is what a session already knows
+/// about itself, so an entry never has to be told what it is called, and a
+/// session ending can name exactly the entry it owns.
+#[derive(Default)]
+pub struct SessionBoard {
+    sessions: Mutex<BTreeMap<u64, Arc<SessionInfo>>>,
 }
-// endregion: --- Types
 
-// region: --- Hub Implementation
+impl SessionBoard {
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-impl Hub {
-    /// Creates a new Hub instance.
-    /// In a production environment, the `signing_keypair` would be loaded from a
-    /// secure, persistent storage. For this implementation, it's generated on startup.
-    pub async fn new(
-        bind_addr: impl Into<String>,
-        server_port: u16,
-        rotation_interval_secs: u64,
-    ) -> Result<Self> {
-        let initial_seed = crypto::generate_seed();
-        let key_manager = Arc::new(TemperKeyManager::new(initial_seed));
+    pub(crate) fn insert(&self, info: SessionInfo) -> Arc<SessionInfo> {
+        let info = Arc::new(info);
+        self.sessions
+            .lock()
+            .expect("session board lock")
+            .insert(info.session_id, info.clone());
+        info
+    }
 
-        // Generate a new long-term signing keypair for the hub's identity.
-        println!("Hub: Generating new long-term signing identity...");
-        let mut rng = TemperEntropy::new()?;
-        let signing_keypair = seal::generate_keypair(&mut rng, "visp-hub-identity")
-            .map_err(Error::custom_from_err)?;
+    pub(crate) fn remove(&self, session_id: u64) {
+        self.sessions
+            .lock()
+            .expect("session board lock")
+            .remove(&session_id);
+    }
 
-        // Verify hub's NetBird identity is available
-        let netbird_mgr = NetbirdManager::new();
-        let hub_identity = netbird_mgr.get_identity().await?;
-        if !hub_identity.is_connected {
-            return Err(Error::Custom(
-                "Hub is not connected to NetBird mesh. Cannot start.".to_string(),
-            ));
-        }
-        println!(
-            "Hub: NetBird identity verified - IP: {}, Hostname: {}",
-            hub_identity.ip, hub_identity.hostname
-        );
-
-        Ok(Self {
-            bind_addr: bind_addr.into(),
-            server_port,
-            rotation_interval_secs,
-            key_manager,
-            signing_keypair,
-            hub_netbird_pubkey: hub_identity.pubkey,
+    /// Make the entry for a freshly accepted session. The mux starts `None`:
+    /// it exists once the relay task has split the session, and the sliver
+    /// between the two is exactly what `SessionInfo::kick` reports as "not
+    /// active yet".
+    pub(crate) fn add(
+        &self,
+        session_id: u64,
+        subject: &str,
+        key_id: &str,
+        certificate: TemperCertificate,
+        since_unix: u64,
+    ) -> Arc<SessionInfo> {
+        self.insert(SessionInfo {
+            session_id,
+            subject: subject.to_string(),
+            key_id: key_id.to_string(),
+            certificate,
+            since_unix,
+            streams_open: AtomicU64::new(0),
+            mux: Mutex::new(None),
         })
     }
 
-    /// Starts the Hub server, including the control plane, data plane, and key rotation loop.
-    pub async fn start(self) -> Result<()> {
-        let shared_state = HubState {
-            server_port: self.server_port,
-            _key_manager: self.key_manager.clone(),
-            _hub_netbird_pubkey: self.hub_netbird_pubkey.clone(),
-        };
-
-        // --- Spawn Master Key Rotation Loop ---
-        let key_manager_clone = self.key_manager.clone();
-        let rotation_interval = self.rotation_interval_secs;
-        tokio::spawn(async move {
-            loop {
-                sleep(Duration::from_secs(rotation_interval)).await;
-                println!("Hub: Rotating master key...");
-                let new_seed = crypto::generate_seed();
-                key_manager_clone.rotate_key(new_seed);
-                println!(
-                    "Hub: Master key rotated to version {}",
-                    key_manager_clone.current_version()
-                );
-            }
-        });
-
-        // --- Spawn Data Plane Listener ---
-        let data_plane_listener =
-            TcpListener::bind(format!("0.0.0.0:{}", self.server_port)).await?;
-        println!("Hub Data Plane listening on 0.0.0.0:{}", self.server_port);
-        let key_manager_for_data_plane = self.key_manager.clone();
-        let signing_keypair_for_data_plane = self.signing_keypair.clone();
-        let hub_netbird_pubkey_for_data_plane = self.hub_netbird_pubkey.clone();
-        tokio::spawn(async move {
-            loop {
-                match data_plane_listener.accept().await {
-                    Ok((socket, addr)) => {
-                        let key_manager = key_manager_for_data_plane.clone();
-                        let signing_keypair = signing_keypair_for_data_plane.clone();
-                        let hub_netbird_pubkey = hub_netbird_pubkey_for_data_plane.clone();
-                        tokio::spawn(async move {
-                            println!("Hub: New connection from {}", addr);
-                            if let Err(e) = Self::handle_client_connection(
-                                socket,
-                                addr,
-                                key_manager,
-                                signing_keypair,
-                                hub_netbird_pubkey,
-                            )
-                            .await
-                            {
-                                eprintln!("Hub: Connection with {} ended with error: {}", addr, e);
-                            } else {
-                                println!("Hub: Connection with {} closed gracefully.", addr);
-                            }
-                        });
-                    }
-                    Err(e) => eprintln!("Hub: Failed to accept new connection: {}", e),
-                }
-            }
-        });
-
-        // --- Start Axum Control Plane ---
-        let app = Router::new()
-            .route("/auth", get(auth_handler))
-            .with_state(shared_state);
-        let control_plane_listener = TcpListener::bind(&self.bind_addr).await?;
-        println!("Hub Control Plane listening on {}", self.bind_addr);
-        axum::serve(
-            control_plane_listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        .map_err(Error::custom_from_err)?;
-
-        Ok(())
+    /// The live sessions, oldest first — the order the fleet table shows,
+    /// because the session up longest is the one an operator tends to be
+    /// looking for. Sorted by connection time, not by session id: the id is
+    /// the handshake's, not the clock's.
+    pub fn snapshot(&self) -> Vec<Arc<SessionInfo>> {
+        let mut sessions: Vec<Arc<SessionInfo>> = self
+            .sessions
+            .lock()
+            .expect("session board lock")
+            .values()
+            .cloned()
+            .collect();
+        sessions.sort_by_key(|info| (info.since_unix, info.session_id));
+        sessions
     }
 
-    /// Handles a new client connection, performing the 3-phase handshake and then streaming data.
-    async fn handle_client_connection(
-        mut socket: TcpStream,
-        addr: SocketAddr,
-        key_manager: Arc<TemperKeyManager>,
-        signing_keypair: TemperKeypair,
-        hub_netbird_pubkey: String,
-    ) -> Result<()> {
-        let mut rng = TemperEntropy::new()?;
+    pub fn get(&self, session_id: u64) -> Option<Arc<SessionInfo>> {
+        self.sessions
+            .lock()
+            .expect("session board lock")
+            .get(&session_id)
+            .cloned()
+    }
 
-        // === PHASE 1: HUB AUTHENTICATION (SEND SEAL) ===
-        // Generate an ephemeral keypair for this specific session for forward secrecy.
-        let ephemeral_envelope_keypair = envelope::generate_envelope_keypair(&mut rng)?;
+    pub fn len(&self) -> usize {
+        self.sessions.lock().expect("session board lock").len()
+    }
 
-        // Create a Seal that signs the public part of our ephemeral key with our long-term identity.
-        let hub_identity = handshake::create_hub_identity_seal(
-            &mut rng,
-            &signing_keypair,
-            &ephemeral_envelope_keypair,
-            &hub_netbird_pubkey,
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Everything the hub's per-session tasks share, and everything a frontend
+/// reads: the event log, who is connected, and what they may ask for.
+pub struct HubShared {
+    pub events: Arc<EventLog>,
+    /// Who the hub is — the About view and `/status` read it; the run loop
+    /// uses it for the handshakes.
+    pub identity: Arc<Identity>,
+    /// The hub's own certificate, as verified at startup.
+    pub certificate: TemperCertificate,
+    /// Who is connected right now: what pairing (`@peer/<subject>`) and
+    /// certificate lookups (`@cert/<subject>`) consult. Entries live exactly
+    /// as long as the session that made them.
+    pub registry: Arc<PeerRegistry>,
+    /// The sessions the hub is serving, for the fleet view and for kicking.
+    pub sessions: Arc<SessionBoard>,
+    /// The authorization table: certified name → exact targets. Lookups
+    /// happen after the handshake proves the name, and a session is handed
+    /// the list it started with (see `relay::run_hub`).
+    ///
+    /// Behind a `RwLock` because the table is no longer fixed at startup:
+    /// the control API replaces it on a roster edit or a reload, and the
+    /// replace must be atomic — a handshake may be looking up a subject at
+    /// the same moment. The read side (handshakes, views) is the common one.
+    /// Crate-visible so the API's tests can build a shared state directly;
+    /// writes go through `replace_grants` even then.
+    pub(crate) grants: RwLock<BTreeMap<String, Vec<String>>>,
+    /// Where the config file lives, so a roster edit knows what to rewrite
+    /// and a reload what to re-read.
+    pub config_path: String,
+}
+
+impl HubShared {
+    /// The grant rows as written, in subject order — the roster view's data,
+    /// and what a reload replaces.
+    pub fn grants_snapshot(&self) -> Vec<(String, Vec<String>)> {
+        self.grants
+            .read()
+            .expect("grants lock")
+            .iter()
+            .map(|(client, targets)| (client.clone(), targets.clone()))
+            .collect()
+    }
+
+    /// The targets one subject may ask for, or `None` when no grant names it.
+    /// `Some(vec![])` is a serve-only row: admitted, may ask for nothing.
+    pub fn targets_for(&self, subject: &str) -> Option<Vec<String>> {
+        self.grants
+            .read()
+            .expect("grants lock")
+            .get(subject)
+            .cloned()
+    }
+
+    /// Swap the whole authorization table at once.
+    ///
+    /// The swap is what makes a roster edit reach running sessions without
+    /// racing them: a handshake either reads the old table or the new one,
+    /// never a mix. Sessions already up keep the list they were handed —
+    /// admission applies to the *next* session, and an operator who wants
+    /// the edit to reach a client that is already connected kicks its
+    /// session (`SessionInfo::kick`) so the client reconnects under the new
+    /// roster.
+    pub fn replace_grants(&self, grants: BTreeMap<String, Vec<String>>) {
+        *self.grants.write().expect("grants lock") = grants;
+    }
+}
+
+pub struct Hub {
+    identity: Arc<Identity>,
+    certificate: TemperCertificate,
+    ca: CaPublicKeys,
+    server: HubServerConfig,
+    /// The control API's address, if the config writes one.
+    control: Option<crate::config::ControlConfig>,
+    shared: Arc<HubShared>,
+}
+
+// endregion: --- Types
+
+// region:    --- Hub
+
+impl Hub {
+    /// Build a hub from a parsed configuration — identity, certificates,
+    /// trust anchors and grants checked — without binding anything yet.
+    ///
+    /// Split from `run` so a frontend can hold the hub's state (board,
+    /// registry, events) before the listener exists, which is what lets the
+    /// console render a hub whose data plane failed to bind.
+    pub fn build(config: AppConfig, config_path: &str, events: Arc<EventLog>) -> Result<Self> {
+        let identity = Identity::load_or_create(
+            config.identity.key_file.clone(),
+            &config.identity.name.clone(),
         )?;
-        let hub_identity_bytes: Vec<u8> = postcard::to_vec::<_, 32768>(&hub_identity)?.to_vec();
 
-        // Send the length-prefixed Seal to the client.
-        socket.write_u32(hub_identity_bytes.len() as u32).await?;
-        socket.write_all(&hub_identity_bytes).await?;
+        let certificate = ca::load_certificate(&config.identity.certificate)?;
+        check_certificate_matches_identity(&identity, &certificate)?;
 
-        // === PHASE 2: SESSION KEY ESTABLISHMENT (RECEIVE ENVELOPE) ===
-        // Read the length-prefixed handshake from the client with a 5-second timeout.
-        let client_handshake_len = tokio::time::timeout(Duration::from_secs(5), socket.read_u32())
-            .await
-            .map_err(|_| {
-                Error::Custom("Handshake timed out waiting for client Envelope".into())
-            })??;
+        let ca = CaPublicKeys::load(&config.ca.public)?;
+        // The hub's own certificate must chain to the CA it is about to trust
+        // others through — otherwise it serves a fleet it is not a member of,
+        // and every client refusal looks like a network problem.
+        ca.verify(&certificate, now_secs())?;
 
-        if client_handshake_len > 16384 {
-            return Err(Error::Custom("Client handshake message too large".into()));
+        let server = config.hub_server.unwrap_or_default();
+        let grants = build_grants(&config.grants);
+        let control = config.control.clone();
+
+        let identity = Arc::new(identity);
+        let shared = Arc::new(HubShared {
+            events,
+            identity: identity.clone(),
+            certificate: certificate.clone(),
+            registry: Arc::new(PeerRegistry::new()),
+            sessions: Arc::new(SessionBoard::new()),
+            grants: RwLock::new(grants),
+            config_path: config_path.to_string(),
+        });
+
+        Ok(Self {
+            identity,
+            certificate,
+            ca,
+            server,
+            control,
+            shared,
+        })
+    }
+
+    pub fn shared(&self) -> Arc<HubShared> {
+        self.shared.clone()
+    }
+
+    /// The `[control]` section as written, for the caller that serves the API.
+    pub fn control_config(&self) -> Option<crate::config::ControlConfig> {
+        self.control.clone()
+    }
+
+    /// Run until the process is killed.
+    pub async fn run(self) -> Result<()> {
+        let events = self.shared.events.clone();
+        events.info(
+            Kind::Other,
+            format!(
+                "Hub: serving as '{}' cert={} valid {}..{}",
+                self.certificate.subject_id,
+                self.certificate.cert_id,
+                self.certificate.not_before,
+                self.certificate.not_after
+            ),
+        );
+        events.info(
+            Kind::Other,
+            format!("Hub: trust anchor CA '{}'", self.ca.name),
+        );
+        if self.shared.grants_snapshot().is_empty() {
+            events.info(
+                Kind::Other,
+                "Hub: no [[grants]] — every client will be refused (this is the default)",
+            );
         }
-        let mut client_handshake_buf = vec![0; client_handshake_len as usize];
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            socket.read_exact(&mut client_handshake_buf),
+        for (client, targets) in self.shared.grants_snapshot() {
+            if targets.is_empty() {
+                // A serve-only node's row: admitted and reachable by peers,
+                // permitted to ask for nothing.
+                events.info(
+                    Kind::Other,
+                    format!(
+                        "Hub: grant '{}' → (serves only; may ask for nothing)",
+                        client
+                    ),
+                );
+            } else {
+                events.info(
+                    Kind::Other,
+                    format!("Hub: grant '{}' → {}", client, targets.join(", ")),
+                );
+            }
+        }
+
+        let mut listener = Listener::bind_with_replay(
+            self.server.data_address.as_str(),
+            self.server.handshake_ttl_secs,
+            self.server.replay_capacity,
         )
-        .await
-        .map_err(|_| Error::Custom("Handshake timed out reading client Envelope data".into()))??;
-        let client_handshake: ClientHandshake = postcard::from_bytes(&client_handshake_buf)?;
-
-        // Decapsulate the client's envelope using our ephemeral private key to get the shared secret.
-        let session_keys: SessionKeys =
-            handshake::decapsulate_client_envelope(&client_handshake, &ephemeral_envelope_keypair)?;
-
-        println!(
-            "Hub: Handshake with {} successful. Entering streaming phase.",
-            addr
+        .await?;
+        events.info(
+            Kind::Listener,
+            format!("Hub: data plane on {}", self.server.data_address),
         );
 
-        // === PHASE 3: STREAMING ENCRYPTION ===
-        // Derive peer_id from the client's NetBird public key (received in the handshake)
-        let peer_id = Self::peer_id_from_netbird_pubkey(&client_handshake.client_netbird_pubkey);
-        let session = StreamSession::new(
-            session_keys.hub_to_client_key, // encryption_key: for encrypting responses
-            session_keys.client_to_hub_key, // decryption_key: for decrypting client data
-            peer_id,
-            key_manager,
-        );
+        let cookie = SessionCookie::new(random_cookie_secret(), self.server.handshake_ttl_secs);
+        let cookie = self.server.require_cookie.then_some(cookie);
+        if cookie.is_some() {
+            events.info(
+                Kind::Listener,
+                "Hub: anti-DoS cookie required (one extra round trip per session)",
+            );
+        }
 
         loop {
-            // 1. Read an encrypted packet from the client using the length-prefixed protocol.
-            // This ensures we have a complete packet before attempting decryption.
-            let encrypted_packet = match read_message(&mut socket).await {
-                Ok(data) => data,
+            let now = now_secs();
+            // Rebuilt per session so the validity window is checked against
+            // the clock as it is now, not as it was at startup: a hub that
+            // outlives a certificate must stop accepting it.
+            let policy = PeerPolicy::Cert {
+                ca_mldsa_pk: self.ca.mldsa_public_key.clone(),
+                ca_slhdsa_pk: self.ca.slhdsa_public_key.clone(),
+                validity: CertValidity::At(now),
+            };
+            let config = ResponderConfig {
+                keypair: &self.identity.signing,
+                certificate: Some(&self.certificate),
+                policy: &policy,
+                concealment: &self.identity.concealment,
+                cookie: cookie.as_ref(),
+                // Overwritten by the listener, which is the only party that
+                // can see the address the peer actually connected from.
+                peer_tag: None,
+                now_secs: now,
+            };
+
+            let mut rng = TemperEntropy::new()?;
+            let session = match listener.accept(&mut rng, &config).await {
+                Ok(session) => session,
                 Err(e) => {
-                    if let Error::Custom(ref msg) = e {
-                        if msg.contains("Unexpected EOF") {
-                            break; // Connection closed gracefully
-                        }
-                    }
-                    return Err(e);
+                    // A failed handshake is an ordinary event on a public
+                    // port. Say so and keep the listener.
+                    events.warn(Kind::Refusal, format!("Hub: handshake refused: {}", e));
+                    continue;
                 }
             };
 
-            // 2. Unseal the packet (verify HMAC, decrypt).
-            let plaintext = session::unseal_stream_packet(&session, &encrypted_packet, false)?;
+            let peer = session.peer_identity();
+            let key_id = peer.key_id.clone();
+            let Some(cert) = peer.certificate.as_deref() else {
+                // Unreachable while the policy above is `Cert`, which refuses
+                // a peer presenting none. Dropping the session is still the
+                // right shape for the impossible branch: no certificate,
+                // nothing to look up.
+                events.warn(
+                    Kind::Refusal,
+                    format!("Hub: peer {} presented no certificate; dropping", key_id),
+                );
+                continue;
+            };
+            let subject = cert.subject_id.clone();
 
-            // 3. In a real implementation, this plaintext would be forwarded to the internet.
-            // For now, we just echo it back to the client to confirm the crypto works.
-            let response_plaintext = plaintext;
+            let Some(targets) = self.shared.targets_for(&subject) else {
+                // Authenticated but not enrolled. The session is dropped
+                // before the relay sees it, and nothing about the grant
+                // table is told to a node that has no entry in it.
+                //
+                // The hint matters: a node that only serves has no targets
+                // to write down, and its operator is the one most likely to
+                // read "no grant names it" as "this is not about me".
+                events.warn(
+                    Kind::Refusal,
+                    format!(
+                        "Hub: refusing '{}' (key_id={}) — no grant names it \
+                         (a node that only serves still needs an entry, with no targets)",
+                        subject, key_id
+                    ),
+                );
+                continue;
+            };
 
-            // 4. Seal the response packet.
-            let response_packet = session::seal_stream_packet(
-                &session,
-                &response_plaintext,
-                &[], // No obfuscation from hub to client
-                false,
-            )?;
-
-            // 5. Send the encrypted response using the length-prefixed protocol.
-            write_message(&mut socket, &response_packet).await?;
+            let session_id = session.session_id();
+            events.info(
+                Kind::Session,
+                format!(
+                    "Hub: session {} with '{}' (key_id={})",
+                    session_id, subject, key_id
+                ),
+            );
+            // The session outlives any one conversation: `run_hub` multiplexes
+            // every stream the client opens over it, each checked against the
+            // granted list *this* session was handed (relay.rs) — and
+            // registers it for as long as it serves it, which is what "this
+            // peer is online" means.
+            let shared = self.shared.clone();
+            let info = shared
+                .sessions
+                .add(session_id, &subject, &key_id, cert.clone(), now);
+            tokio::spawn(async move {
+                if let Err(e) = relay::run_hub(session, info, targets, shared.clone()).await {
+                    shared
+                        .events
+                        .warn(Kind::Session, format!("Hub: session ended: {}", e));
+                }
+            });
         }
-
-        Ok(())
-    }
-
-    /// Creates a deterministic, 32-byte peer ID from a client's NetBird public key using BLAKE3.
-    /// This cryptographically binds the transport identity to the NetBird mesh identity.
-    fn peer_id_from_netbird_pubkey(netbird_pubkey: &str) -> [u8; 32] {
-        let hash = blake3::hash(netbird_pubkey.as_bytes());
-        *hash.as_bytes()
     }
 }
-// endregion: --- Hub Implementation
 
-// region: --- Handlers & Helpers
+// endregion: --- Hub
 
-/// Axum handler for the `/auth` endpoint.
-async fn auth_handler(
-    State(state): State<HubState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-) -> std::result::Result<Json<AuthResponse>, axum::http::StatusCode> {
-    // Verify the caller is a valid NetBird peer before providing connection info.
-    if !is_valid_netbird_peer(addr.ip()) {
-        eprintln!(
-            "Hub: Unauthorized auth attempt from non-NetBird IP {}",
-            addr.ip()
-        );
-        return Err(axum::http::StatusCode::UNAUTHORIZED);
-    }
+// region:    --- Entry point
 
-    // Get the hub's NetBird identity to include in the auth response
-    let netbird_mgr = NetbirdManager::new();
-    let hub_identity = match netbird_mgr.get_identity().await {
-        Ok(identity) => {
-            if !identity.is_connected {
-                eprintln!("Hub: NetBird connection lost, denying auth");
-                return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
-            }
-            identity
-        }
-        Err(e) => {
-            eprintln!("Hub: Failed to verify NetBird identity: {}", e);
-            return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-
-    Ok(Json(AuthResponse {
-        server_port: state.server_port,
-        hub_netbird_pubkey: hub_identity.pubkey,
-        hub_hostname: hub_identity.hostname,
-    }))
+/// Build a hub from a parsed configuration and run it, printing its log —
+/// the headless binary's entry point. The control API, if `[control]` is
+/// configured, is served from the same runtime.
+pub async fn start(path: &str, config: AppConfig) -> Result<()> {
+    let hub = Hub::build(config, path, EventLog::console())?;
+    crate::control::spawn(
+        crate::control::ApiState::Hub {
+            shared: hub.shared(),
+        },
+        hub.control_config(),
+    )
+    .await?;
+    hub.run().await
 }
 
-/// Mock verification for NetBird peers.
-fn is_valid_netbird_peer(ip: IpAddr) -> bool {
-    // In production, this would involve a call to the NetBird management API.
-    // For now, we assume any IP in the CGNAT range is a valid peer.
-    if let IpAddr::V4(ipv4) = ip {
-        let octets = ipv4.octets();
-        // Check for 100.64.0.0/10 range
-        if octets[0] == 100 && (octets[1] & 0b1100_0000) == 64 {
-            return true;
-        }
-    }
-    // Allow localhost for local testing
-    ip.is_loopback()
+/// Fold the grant list into its lookup shape.
+///
+/// Duplicate names were rejected in `AppConfig::validate`; this collects
+/// without re-checking. Shared with `control.rs`, which applies the same
+/// fold to a roster it just validated.
+pub(crate) fn build_grants(grants: &[GrantConfig]) -> BTreeMap<String, Vec<String>> {
+    grants
+        .iter()
+        .map(|grant| (grant.client.clone(), grant.targets.clone()))
+        .collect()
 }
-// endregion: --- Handlers & Helpers
+
+// endregion: --- Entry point
+
+// region:    --- Helpers
+
+fn random_cookie_secret() -> [u8; 32] {
+    // Seeded from the OS through the same DRBG the identity uses, so the
+    // cookie secret is no weaker than the keys beside it.
+    use rand_core::RngCore;
+    let mut rng = TemperEntropy::new().expect("OS entropy for the cookie secret");
+    let mut secret = [0u8; 32];
+    rng.fill_bytes(&mut secret);
+    secret
+}
+
+// endregion: --- Helpers

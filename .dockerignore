@@ -1,0 +1,10 @@
+# The build context is only `src`, `crates`, `scripts/enroll-demo.sh` and two
+# manifests, but the daemon still tars up whatever is here first.
+target/
+.git/
+.github/
+packaging/
+*.tar.gz
+*.rpm
+*.pkg.tar.zst
+*.tar.xz

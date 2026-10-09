@@ -8,16 +8,6 @@ pub enum Error {
     #[from(String, &String, &str)]
     Custom(String),
 
-    HandshakeFailed,
-    ReplayDetected,
-    HmacMismatch,
-    InvalidCipherKey,
-    EncryptionFailed,
-    DecryptionFailed,
-    InvalidHeader,
-    PacketTooShort,
-    InvalidObfuscationSize,
-
     // -- Externals
     #[from]
     Io(std::io::Error),
@@ -36,6 +26,19 @@ impl Error {
 
     pub fn custom(val: impl Into<String>) -> Self {
         Self::Custom(val.into())
+    }
+
+    /// The message itself, without the `Custom(...)` wrapper.
+    ///
+    /// `Display` here is the debug formatter — deliberate, so a log line
+    /// never loses which variant failed — which makes it wrong for messages
+    /// *about* an error: wrapping one in another `Error::custom` otherwise
+    /// produces `Custom("...: Custom(\"...\")")`.
+    pub fn message(&self) -> String {
+        match self {
+            Self::Custom(message) => message.clone(),
+            other => other.to_string(),
+        }
     }
 }
 

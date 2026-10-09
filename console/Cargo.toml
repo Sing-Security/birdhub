@@ -1,0 +1,60 @@
+# birdhub-console — the fleet console: a desktop frontend for the hub and the
+# node, in the Splicer/Noxgraph mold: one process, core on its own tokio
+# thread, the egui frontend on the main thread, and a localhost control API
+# calling the same functions the buttons call.
+#
+# The UI pins mirror Splicer's and Noxgraph's (egui/eframe 0.35, wgpu, no
+# glow) so the three render through the same GPU backend and the same shell.
+
+[package]
+name = "birdhub-console"
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[lib]
+name = "birdhub_console"
+path = "src/lib.rs"
+
+[[bin]]
+name = "birdhub-console"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[dependencies]
+# The core, embedded: the console runs the hub or the node in-process and
+# reads its state through the same handles the control API serves.
+birdhub = { path = ".." }
+
+# -- UI, the same pins the reference apps render with.
+egui = "0.35"
+eframe = { version = "0.35", default-features = false, features = [
+    "wgpu",
+    "default_fonts",
+    "wayland",
+    "x11",
+] }
+egui_extras = { version = "=0.35.0", default-features = false }
+
+# -- Async: the runtime the core runs on, same thread model as Splicer's.
+tokio = { version = "1", features = ["full"] }
+
+# -- Encoding
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# Headless screenshots of the real views, the way noxgraph's shot tests
+# capture the Program Map: what a test renders is what a user sees.
+egui_kittest = { version = "0.35", features = ["wgpu", "snapshot", "eframe"] }
+# The shots pick their own adapter (kittest's selector trusts enumeration
+# order; a driver that dies at vkCreateDevice must be opened, not trusted),
+# so the setup types and a blocking poll come in beside the harness.
+egui-wgpu = "0.35"
+pollster = "0.4"

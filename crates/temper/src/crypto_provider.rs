@@ -14,13 +14,20 @@
 //! # Example
 //!
 //! ```no_run
+//! # #[cfg(feature = "signatures")]
+//! # {
 //! use temper::crypto_provider::{CryptoProvider, get_crypto_provider};
 //!
 //! // Default CPU provider is automatically available
 //! let provider = get_crypto_provider();
+//! # }
 //! ```
+//!
+//! `get_crypto_provider` is gated on `signatures`, and this module is not, so
+//! the example is compile-checked only when that feature is on. The module
+//! compiles without it — that is the point of the gate — but the trait and
+//! the accessor are not there to call.
 
-// Memory: no_std pattern per rust-nostd.instructions.md — use alloc for heap types
 #[cfg(all(feature = "alloc", feature = "signatures"))]
 use alloc::vec::Vec;
 
@@ -39,7 +46,6 @@ pub mod cpu;
 // region:    --- CryptoProvider Trait (signatures feature only)
 
 #[cfg(feature = "signatures")]
-
 /// Abstraction for Post-Quantum Cryptography signature operations.
 ///
 /// This trait allows plugging in different implementations of ML-DSA and SLH-DSA,
@@ -56,8 +62,8 @@ pub mod cpu;
 /// # Security Properties
 ///
 /// Implementations must provide:
-/// - ML-DSA-65: NIST Level 3 security (Module-LWE hardness)
-/// - SLH-DSA: NIST Level 5 security (hash-based signatures)
+/// - ML-DSA-65: NIST Category 3 security (Module-LWE hardness)
+/// - SLH-DSA-SHA2-128f: NIST Category 1 security (hash-based signatures)
 pub trait CryptoProvider: Send + Sync {
 	/// Generate ML-DSA-65 keypair.
 	///
@@ -154,7 +160,6 @@ pub trait CryptoProvider: Send + Sync {
 use spin::Mutex;
 
 // Global static provider using CPU implementation by default
-// Memory: lazy initialization pattern — CPU provider is default, zero-config
 #[cfg(feature = "signatures")]
 static GLOBAL_PROVIDER: Mutex<Option<&'static dyn CryptoProvider>> = Mutex::new(None);
 
@@ -182,7 +187,6 @@ pub fn get_crypto_provider() -> &'static dyn CryptoProvider {
 	match *guard {
 		Some(provider) => provider,
 		None => {
-			// Memory: default to CPU provider — zero-config behavior
 			drop(guard); // Release lock before accessing CPU_PROVIDER
 			&cpu::CPU_PROVIDER
 		}

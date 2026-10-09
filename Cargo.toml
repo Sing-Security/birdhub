@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/temper"]
+members = [".", "crates/temper", "console"]
 
 [package]
 name = "birdhub"
@@ -8,40 +8,33 @@ edition = "2021"
 
 [lints.rust]
 unsafe_code = "forbid"
-# unused = { level = "allow", priority = -1 } # For exploratory dev.
 
 [dependencies]
 # -- Async
 tokio = { version = "1", features = ["full"] }
-async-trait = "0.1"
-futures = "0.3"
 # -- Logging
 log = "0.4"
 env_logger = "0.11"
-# -- Json
+# -- Encoding
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_with = { version = "3", features = ["macros"] }
-# -- Others
-derive_more = { version = "2", features = ["from", "display"] }
-bytes = "1"
-arc-swap = "1.9.0"
-crossbeam-utils = "0.8.21"
 toml = "1.1.0"
-axum = "0.8.8"
-reqwest = { version = "0.13.2", features = ["json"] }
-dns-parser = "0.8.0"
-rand = "0.10.0"
-zeroize = { version = "1", features = ["derive"] }
-subtle = "2"
-blake3 = "1"
-heapless = "0.7"
-chacha20poly1305 = "0.10"
 postcard = { version = "1.0", features = ["alloc"] }
+derive_more = { version = "2", features = ["from", "display"] }
+# -- Must match the rand_core temper's TemperEntropy implements.
+rand_core = "0.6"
 
-# -- New internal and external dependencies
-temper = { path = "crates/temper" }
-socket2 = "0.5"
-tun = "0.8"
-tokio-util = { version = "0.7", features = ["full"] }
-rand_core = "0.10.0"
+# -- The local control API (control.rs) — the same version Splicer pairs with
+# -- its tokio stack, and a plain JSON surface rather than a hand-rolled one.
+axum = "0.8"
+serde_json = "1"
+
+# -- Vendored, with the session protocol's network transport. Vendored rather
+# -- than a path dependency into CrucibleOS so the Docker build context is this
+# -- repository alone. `scripts/sync-temper.sh` refreshes it from the source
+# -- of truth and `--check` fails when they have drifted.
+temper = { path = "crates/temper", features = ["transport"] }
+
+[dev-dependencies]
+# Route-level API tests send requests through the real router with `oneshot`,
+# which is how a route's status and body are asserted without a listener.
+tower = { version = "0.5", features = ["util"] }

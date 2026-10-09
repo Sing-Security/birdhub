@@ -85,6 +85,13 @@ pub struct JitterEntropy {
 }
 
 #[cfg(feature = "std")]
+impl Default for JitterEntropy {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+#[cfg(feature = "std")]
 impl JitterEntropy {
 	/// Create a new jitter entropy source with default iterations (1024).
 	pub fn new() -> Self {
@@ -146,6 +153,13 @@ impl EntropySource for JitterEntropy {
 /// This provides a small amount of entropy from OS-level randomization.
 #[cfg(feature = "std")]
 pub struct ProcessEntropy;
+
+#[cfg(feature = "std")]
+impl Default for ProcessEntropy {
+	fn default() -> Self {
+		Self::new()
+	}
+}
 
 #[cfg(feature = "std")]
 impl ProcessEntropy {

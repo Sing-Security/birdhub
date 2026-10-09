@@ -1,185 +1,155 @@
-// region:    --- Modules
+//! The headless entry point: arguments, then the core from `birdhub`'s
+//! library — the docs for the relay itself live in `src/lib.rs`.
+//!
+//! Everything here is CLI shape: flag parsing for the three enrollment
+//! subcommands, and the config-path-or-subcommand decision. The run modes
+//! live in the library, so the console can drive the same core.
 
-mod auth;
-mod config;
-mod crypto;
-mod dns;
-mod error;
-mod gateway;
-mod handshake;
-mod health;
-mod hub;
-mod i2p;
-mod leaks;
-mod netbird;
-mod nft;
-mod policy;
-mod region;
-mod routing;
-mod session;
-mod transport;
-mod watchdog;
+use birdhub::config::AppMode;
+use birdhub::{ca, config, hub, identity, transport, Error, Result};
+use std::ffi::OsString;
 
-pub use error::{Error, Result};
-
-// endregion: --- Modules
-
-use std::sync::Arc;
-use tokio::signal;
+// region:    --- Entry point
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("VISP Network Agent Starting...");
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    // -- 1. Load Configuration
-    let initial_config = config::AppConfig::load_from_file("config.toml").unwrap_or_else(|e| {
-        println!(
-            "Warning: Could not load config.toml ({}), using default configuration.",
-            e
-        );
-        config::AppConfig {
-            exit: config::ExitConfig {
-                mode: config::ExitMode::Auto,
-                primary: Some("us".to_string()),
-                secondary: Some("eu".to_string()),
-            },
-            hubs: vec![],
-            ..Default::default()
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(OsString::into_string)
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|bad| Error::custom(format!("argument is not valid UTF-8: {:?}", bad)))?;
+
+    match (
+        args.first().map(String::as_str),
+        args.get(1).map(String::as_str),
+    ) {
+        (None, _) => run("config.toml").await,
+        (Some("-h" | "--help"), _) => {
+            println!("{}", usage());
+            Ok(())
         }
-    });
-
-    println!(
-        "Loaded configuration with {} hubs and {} transports configured.",
-        initial_config.hubs.len(),
-        initial_config.transports.len()
-    );
-    let _config_manager = Arc::new(config::ConfigManager::new(initial_config.clone()));
-
-    // -- 2. Check App Mode (Hub vs Client)
-    if initial_config.app.mode == config::AppMode::Hub {
-        println!("Starting in Hub mode...");
-        let bind_addr = &initial_config.hub_server.bind_address;
-        let server_port = initial_config.hub_server.server_port;
-        let rotation_interval = initial_config.hub_server.rotation_interval_secs;
-        println!(
-            "Binding Control API to {} and VISP Data Plane to port {} (Rotation: {}s)",
-            bind_addr, server_port, rotation_interval
-        );
-
-        let hub_server = hub::Hub::new(bind_addr, server_port, rotation_interval).await?;
-        hub_server.start().await?;
-        return Ok(());
+        (Some("ca"), Some("init")) => {
+            reject_unknown(&args, &["--key", "--pub", "--id"])?;
+            ca::cmd_init(
+                &required_flag(&args, "--key")?,
+                &required_flag(&args, "--pub")?,
+                &flag(&args, "--id")?.unwrap_or_else(|| "fleet-ca".to_string()),
+            )
+        }
+        (Some("ca"), Some("issue")) => {
+            reject_unknown(&args, &["--ca", "--identity", "--days", "--out"])?;
+            let days: u64 = required_flag(&args, "--days")?
+                .parse()
+                .map_err(|e| Error::custom(format!("--days must be a number: {}", e)))?;
+            ca::cmd_issue(
+                &required_flag(&args, "--ca")?,
+                &required_flag(&args, "--identity")?,
+                days,
+                &required_flag(&args, "--out")?,
+            )
+        }
+        (Some("identity"), Some("export")) => {
+            reject_unknown(&args, &["--key", "--pub", "--name"])?;
+            identity::cmd_export(
+                &required_flag(&args, "--key")?,
+                &required_flag(&args, "--pub")?,
+                &flag(&args, "--name")?.unwrap_or_else(|| "birdhub".to_string()),
+            )
+        }
+        (Some("ca"), _) | (Some("identity"), _) => {
+            Err(Error::custom(format!("unknown subcommand\n\n{}", usage())))
+        }
+        // A bare argument that is not a subcommand is the config path. One
+        // that starts with `-` is a flag nobody defined — most likely a
+        // mistyped subcommand, and worth saying so rather than trying to
+        // open a file named `--help`.
+        (Some(flag), _) if flag.starts_with('-') => Err(Error::custom(format!(
+            "unknown flag '{}'\n\n{}",
+            flag,
+            usage()
+        ))),
+        (Some(path), _) => run(path).await,
     }
+}
 
-    println!("Starting in Client mode...");
+/// Load a configuration and run it in its mode.
+async fn run(path: &str) -> Result<()> {
+    let config = config::AppConfig::load_from_file(path)?;
+    // Before anything binds or reads a key: a misplaced section is a
+    // configuration line to fix, not a runtime symptom to debug.
+    config.validate()?;
 
-    // -- 3. Initialize NetBird Identity & Auth
-    let netbird_manager = Arc::new(netbird::NetbirdManager::new());
-    let identity = netbird_manager.get_identity().await?;
-    println!("NetBird Identity: {} ({})", identity.hostname, identity.ip);
-
-    let auth_manager = Arc::new(auth::AuthManager::new());
-    let _gateway_manager = Arc::new(gateway::GatewayManager::new(auth_manager.clone()));
-
-    // -- 4. Initialize Routing & nftables
-    let nft_manager = Arc::new(nft::NftManager::new());
-    let route_manager = Arc::new(routing::RouteManager::new());
-
-    println!("Applying base firewall rules and routing tables...");
-    nft_manager.apply_base_rules()?;
-    nft_manager.enable_kill_switch()?;
-    nft_manager.block_cleartext_dns()?;
-    route_manager.reset_tables()?;
-
-    // -- 5. Initialize DNS
-    let dns_manager = Arc::new(dns::DnsManager::new());
-    dns_manager.set_internal_zone(
-        &initial_config.dns.internal_zone,
-        &initial_config.dns.nameserver_ip,
-    )?;
-
-    // -- 6. Initialize I2P Transparent Proxying
-    let i2p_manager = Arc::new(i2p::I2pManager::new(initial_config.i2p.clone()));
-    if i2p_manager.is_enabled() {
-        if let Err(e) = i2p_manager.enable_transparent_routing() {
-            println!("Warning: Failed to enable I2P routing: {}", e);
+    match config.app.mode {
+        AppMode::Hub => {
+            println!("birdhub starting in hub mode (config: {})", path);
+            hub::start(path, config).await
         }
-    }
-
-    // -- 7. Start Transports
-    if initial_config.transports.is_empty() {
-        println!("No transports configured in config.toml. Skipping transport start.");
-    } else {
-        for t in &initial_config.transports {
-            let transport_config = transport::TransportConfig {
-                server_address: t.server_address.clone(),
-                server_port: t.server_port,
-                local_port: t.local_port,
-                mark: t.mark,
-            };
-
-            let transport_manager = Arc::new(transport::TransportManager::new(transport_config));
-            let transport_name = t.name.clone();
-            tokio::spawn(async move {
-                if let Err(e) = transport_manager.start_tunnel().await {
-                    eprintln!("Transport '{}' failed: {}", transport_name, e);
-                }
-            });
-        }
-        println!("Transports started.");
-    }
-
-    // -- 8. Start Health Checks & Watchdog
-    let watchdog = watchdog::Watchdog::new(initial_config.watchdog.check_interval_secs);
-    let watchdog_task = tokio::spawn(async move {
-        if let Err(e) = watchdog.start().await {
-            eprintln!("Watchdog failed: {:?}", e);
-        }
-    });
-
-    // -- 9. Apply Exit Policies (Initial)
-    let policy_engine = policy::PolicyEngine::new();
-    let network_context = policy::NetworkContext {
-        netbird_alive: true,
-        us_exit_latency_ms: Some(45),
-        eu_exit_latency_ms: Some(120),
-    };
-
-    let decision = policy_engine.evaluate(&initial_config.exit, &network_context)?;
-    println!("Initial Policy Decision: {:?}", decision);
-
-    match decision {
-        policy::ExitDecision::ShadowsocksRegion(region) => {
-            println!("Routing traffic via {} region...", region);
-            let region_enum = if region == "eu" {
-                dns::DnsRegion::Eu
-            } else {
-                dns::DnsRegion::Us
-            };
-            dns_manager.switch_region(region_enum)?;
-            // Apply routing rules accordingly...
-        }
-        policy::ExitDecision::NetbirdOnly => {
-            println!("Routing traffic via NetBird only...");
-            dns_manager.switch_region(dns::DnsRegion::NetbirdOnly)?;
-        }
-        policy::ExitDecision::DropAll => {
-            println!("Dropping all traffic (Kill-switch active)...");
-            nft_manager.enable_kill_switch()?;
-        }
-        policy::ExitDecision::LoadBalance(regions) => {
-            println!("Load balancing across regions: {:?}", regions);
+        AppMode::Client => {
+            println!("birdhub starting in client mode (config: {})", path);
+            transport::start(path, config).await
         }
     }
+}
 
-    println!("VISP Network Agent is running. Press Ctrl+C to exit.");
+// endregion: --- Entry point
 
-    // -- Wait for Shutdown Signal
-    signal::ctrl_c().await.expect("Failed to listen for ctrl_c");
-    println!("\nShutting down VISP Network Agent...");
+// region:    --- Arguments
 
-    // Cleanup
-    watchdog_task.abort();
+/// Flags are hand-parsed for the same reason the HTTP client was: three
+/// subcommands with a fixed flag set do not justify a dependency, and the
+/// error text is better when it is ours.
+fn flag(args: &[String], name: &str) -> Result<Option<String>> {
+    match args.iter().position(|arg| arg == name) {
+        None => Ok(None),
+        Some(i) => args
+            .get(i + 1)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| Error::custom(format!("{} needs a value", name))),
+    }
+}
 
+fn required_flag(args: &[String], name: &str) -> Result<String> {
+    flag(args, name)?.ok_or_else(|| Error::custom(format!("missing {}\n\n{}", name, usage())))
+}
+
+/// Reject flags this subcommand does not define.
+///
+/// Without this a mistyped `--dyas` is simply absent, and "missing --days"
+/// sends the reader looking for the wrong problem.
+fn reject_unknown(args: &[String], known: &[&str]) -> Result<()> {
+    for arg in args.iter().filter(|arg| arg.starts_with("--")) {
+        if !known.contains(&arg.as_str()) {
+            return Err(Error::custom(format!(
+                "unknown flag '{}'\n\n{}",
+                arg,
+                usage()
+            )));
+        }
+    }
     Ok(())
 }
+
+fn usage() -> &'static str {
+    "birdhub — relay over Temper identities
+
+Usage:
+  birdhub [config.toml]                 run (default: config.toml)
+
+  birdhub ca init --key CA.key --pub ca.pub [--id NAME]
+      Generate the fleet CA. The key file is the fleet's whole trust root:
+      keep it on this machine and nowhere else. `ca.pub` goes to every node.
+
+  birdhub ca issue --ca CA.key --identity node.pub --days N --out node.cert
+      Certify a node's exported public identity. Copy the certificate back to
+      the node as its [identity] certificate.
+
+  birdhub identity export --key identity.key --pub node.pub [--name NAME]
+      Write this node's public keys for the CA. Run on the node. Generates
+      `identity.key` if it does not exist yet; NAME (default `birdhub`) is
+      used only in that case, and becomes the certificate's subject id."
+}
+
+// endregion: --- Arguments

@@ -1,8 +1,10 @@
 //! Certificate Authority (CA) for issuing and verifying quantum-safe certificates.
 //!
 //! Provides a [`TemperCa`] that can issue [`TemperCertificate`]s binding a subject
-//! identity to a quantum-safe keypair.  The certificate is backed by a dual
-//! post-quantum Seal (ML-DSA-65 + SLH-DSA) created by the CA's [`TemperKeypair`].
+//! identity to its quantum-safe public keys — both the signing keys and the
+//! concealment key (see [`ConcealmentBinding`] for why the latter is certified).
+//! The certificate is backed by a dual post-quantum Seal (ML-DSA-65 + SLH-DSA)
+//! created by the CA's [`TemperKeypair`].
 //!
 //! # Protocol
 //!
@@ -19,23 +21,28 @@
 //! # Example
 //!
 //! ```ignore
-//! use forgecore_temper::{TemperEntropy, ca::TemperCa, seal::generate_keypair};
+//! use temper::{TemperEntropy, ca::{ConcealmentBinding, SubjectKeys, TemperCa}, seal::generate_keypair};
 //!
 //! let mut rng = TemperEntropy::from_seed([0x42; 32]);
 //! let ca = TemperCa::new(&mut rng, "root-ca@example.com")?;
 //!
 //! let subject_kp = generate_keypair(&mut rng, "alice@example.com")?;
+//! let subject_keys = SubjectKeys {
+//!     mldsa_public_key: subject_kp.mldsa_public_key.clone(),
+//!     slhdsa_public_key: subject_kp.slhdsa_public_key.clone(),
+//!     concealment: ConcealmentBinding::from_public_key(&subject_concealment_public),
+//! };
+//!
 //! let cert = ca.issue_certificate(
 //!     &mut rng,
 //!     "alice@example.com",
-//!     &subject_kp.mldsa_public_key,
-//!     &subject_kp.slhdsa_public_key,
+//!     &subject_keys,
 //!     0,    // not_before: immediately valid
 //!     0,    // not_after:  no expiry
 //! )?;
 //!
 //! assert!(ca.verify_certificate(&cert)?);
-//! # Ok::<(), forgecore_temper::Error>(())
+//! # Ok::<(), temper::Error>(())
 //! ```
 
 use alloc::collections::BTreeMap;
@@ -49,10 +56,90 @@ use crate::seal::{Seal, TemperKeypair, create_seal, generate_keypair, verify_sea
 
 // region:    --- Constants
 
-const CA_SCHEMA_VERSION: u16 = 1;
-const CA_CERT_DOMAIN: &str = "Temper.CA.Cert.v1";
+// Schema 2 adds the subject's concealment public key to the signed content.
+// The bump is deliberately a hard break: a schema-1 certificate does not
+// verify under this code (the domain string differs too), because a v1 cert
+// cannot answer the one question first contact actually has — is the
+// concealment key I am about to seal my identity to the peer's? Silently
+// accepting one would turn "certified" into "certified, minus the part that
+// matters". No schema-1 certificate was ever issued outside tests.
+const CA_SCHEMA_VERSION: u16 = 2;
+const CA_CERT_DOMAIN: &str = "Temper.CA.Cert.v2";
 
 // endregion: --- Constants
+
+// region:    --- Concealment Binding
+
+/// A subject's long-term concealment public key, as certified.
+///
+/// A certificate that signs only the subject's signing keys still leaves the
+/// first flight unauthenticated. The initiator seals its identity to the
+/// responder's concealment key, taken from whatever identity document it
+/// holds; an impostor who substitutes a key it controls opens that flight —
+/// learning exactly the identity the seal exists to hide — without ever
+/// completing the handshake, because nothing but the responder's word said
+/// which concealment key was the right one. Signing the concealment key into
+/// the certificate removes the last input a first contact takes on faith.
+///
+/// The `key_id` a [`ConcealmentPublicKey`](crate::envelope::ConcealmentPublicKey)
+/// carries is *not* stored here: it is derived from the two keys, so a stored
+/// copy would be a second source that can disagree with the first.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConcealmentBinding {
+	/// Format version of the concealment key (mirrors the envelope schema).
+	pub schema_version: u16,
+
+	/// ML-KEM-1024 public (encapsulation) key.
+	pub mlkem_public_key: Vec<u8>,
+
+	/// X25519 public key.
+	pub x25519_public_key: Vec<u8>,
+}
+
+#[cfg(feature = "envelope")]
+impl ConcealmentBinding {
+	/// The binding to certify for a published concealment key.
+	pub fn from_public_key(public: &crate::envelope::ConcealmentPublicKey) -> Self {
+		Self {
+			schema_version: public.schema_version,
+			mlkem_public_key: public.mlkem_public_key.clone(),
+			x25519_public_key: public.x25519_public_key.clone(),
+		}
+	}
+
+	/// Rebuild the published form — the key an initiator encapsulates to.
+	pub fn to_public_key(&self) -> crate::envelope::ConcealmentPublicKey {
+		crate::envelope::ConcealmentPublicKey::from_parts(
+			self.schema_version,
+			self.mlkem_public_key.clone(),
+			self.x25519_public_key.clone(),
+		)
+	}
+}
+
+// endregion: --- Concealment Binding
+
+// region:    --- Subject Keys
+
+/// The public keys a [`TemperCertificate`] binds to its subject.
+///
+/// Grouped rather than passed as three positional key arguments: a signing
+/// keypair and a concealment key are one identity, and an API of five
+/// `&[u8]`-shaped arguments is one transposition away from certifying the
+/// wrong key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubjectKeys {
+	/// Subject's ML-DSA-65 public key (1952 bytes).
+	pub mldsa_public_key: Vec<u8>,
+
+	/// Subject's SLH-DSA public key (32 bytes).
+	pub slhdsa_public_key: Vec<u8>,
+
+	/// Subject's concealment public key.
+	pub concealment: ConcealmentBinding,
+}
+
+// endregion: --- Subject Keys
 
 // region:    --- Internal Content Struct
 
@@ -70,6 +157,7 @@ struct CertContent {
 	not_after: u64,
 	mldsa_public_key: Vec<u8>,
 	slhdsa_public_key: Vec<u8>,
+	concealment: ConcealmentBinding,
 }
 
 // endregion: --- Internal Content Struct
@@ -78,8 +166,9 @@ struct CertContent {
 
 /// A quantum-safe certificate issued by a [`TemperCa`].
 ///
-/// Binds a `subject_id` to the subject's ML-DSA-65 and SLH-DSA public keys,
-/// signed by the CA's dual PQC signatures via a [`Seal`].
+/// Binds a `subject_id` to the subject's ML-DSA-65 and SLH-DSA public keys
+/// *and* to its concealment public key ([`ConcealmentBinding`]), signed by the
+/// CA's dual PQC signatures via a [`Seal`].
 ///
 /// # Verification
 ///
@@ -88,7 +177,7 @@ struct CertContent {
 /// let valid = ca.verify_certificate(&cert)?;
 ///
 /// // If you only have the CA's public keys:
-/// let valid = forgecore_temper::ca::verify_certificate(
+/// let valid = temper::ca::verify_certificate(
 ///     &cert,
 ///     &ca.keypair.mldsa_public_key,
 ///     &ca.keypair.slhdsa_public_key,
@@ -120,6 +209,9 @@ pub struct TemperCertificate {
 	/// Subject's SLH-DSA public key (32 bytes).
 	pub slhdsa_public_key: Vec<u8>,
 
+	/// Subject's certified concealment public key.
+	pub concealment: ConcealmentBinding,
+
 	/// CA's dual PQC signature binding all certificate fields.
 	pub seal: Seal,
 }
@@ -133,6 +225,55 @@ impl TemperCertificate {
 			return false;
 		}
 		current_time_secs > self.not_after
+	}
+
+	/// Returns `true` if the certificate is not yet valid at
+	/// `current_time_secs`.
+	///
+	/// Always returns `false` when `not_before == 0` (valid immediately).
+	///
+	/// This is the half `is_expired` does not cover, and it matters: a
+	/// certificate issued for a future window verifies its seal perfectly
+	/// well, so without this check an attacker who can obtain a
+	/// not-yet-current certificate can present it early.
+	pub fn is_not_yet_valid(&self, current_time_secs: u64) -> bool {
+		if self.not_before == 0 {
+			return false;
+		}
+		current_time_secs < self.not_before
+	}
+
+	/// Both ends of the validity window, as a verdict rather than a boolean.
+	///
+	/// Prefer this to calling [`is_expired`](Self::is_expired) and
+	/// [`is_not_yet_valid`](Self::is_not_yet_valid) separately: a caller that
+	/// checks only one of the two has a check that passes for the wrong
+	/// reason, and the failure is silent.
+	pub fn check_validity(&self, current_time_secs: u64) -> Result<()> {
+		if self.is_not_yet_valid(current_time_secs) {
+			return Err(Error::CryptoError(format!(
+				"certificate is not valid until {}, presented at {}",
+				self.not_before, current_time_secs
+			)));
+		}
+		if self.is_expired(current_time_secs) {
+			return Err(Error::CryptoError(format!(
+				"certificate expired at {}, presented at {}",
+				self.not_after, current_time_secs
+			)));
+		}
+		Ok(())
+	}
+
+	/// The certificate's subject keys as one value — the form
+	/// [`build_cert_content`] signs, and what a verifier compares a
+	/// presented identity against.
+	pub fn subject_keys(&self) -> SubjectKeys {
+		SubjectKeys {
+			mldsa_public_key: self.mldsa_public_key.clone(),
+			slhdsa_public_key: self.slhdsa_public_key.clone(),
+			concealment: self.concealment.clone(),
+		}
 	}
 
 	/// Serialize the certificate to postcard bytes.
@@ -183,16 +324,14 @@ impl TemperCa {
 	///
 	/// * `rng` - Entropy source for the dual-PQC signing operations
 	/// * `subject_id` - Human-readable subject identifier
-	/// * `subject_mldsa_pk` - Subject's ML-DSA-65 public key (1952 bytes)
-	/// * `subject_slhdsa_pk` - Subject's SLH-DSA public key (32 bytes)
+	/// * `subject_keys` - Subject's signing and concealment public keys
 	/// * `not_before` - Validity start in Unix seconds (0 = immediately valid)
 	/// * `not_after` - Validity end in Unix seconds (0 = no expiry)
 	pub fn issue_certificate(
 		&self,
 		rng: &mut TemperEntropy,
 		subject_id: &str,
-		subject_mldsa_pk: &[u8],
-		subject_slhdsa_pk: &[u8],
+		subject_keys: &SubjectKeys,
 		not_before: u64,
 		not_after: u64,
 	) -> Result<TemperCertificate> {
@@ -202,8 +341,7 @@ impl TemperCa {
 			&self.keypair.signer_id,
 			not_before,
 			not_after,
-			subject_mldsa_pk,
-			subject_slhdsa_pk,
+			subject_keys,
 		)?;
 
 		let seal = create_seal(rng, &content_bytes, &self.keypair, BTreeMap::new())?;
@@ -215,8 +353,9 @@ impl TemperCa {
 			issuer_id: self.keypair.signer_id.clone(),
 			not_before,
 			not_after,
-			mldsa_public_key: subject_mldsa_pk.to_vec(),
-			slhdsa_public_key: subject_slhdsa_pk.to_vec(),
+			mldsa_public_key: subject_keys.mldsa_public_key.clone(),
+			slhdsa_public_key: subject_keys.slhdsa_public_key.clone(),
+			concealment: subject_keys.concealment.clone(),
 			seal,
 		})
 	}
@@ -257,8 +396,7 @@ pub fn verify_certificate(cert: &TemperCertificate, ca_mldsa_pk: &[u8], ca_slhds
 		&cert.issuer_id,
 		cert.not_before,
 		cert.not_after,
-		&cert.mldsa_public_key,
-		&cert.slhdsa_public_key,
+		&cert.subject_keys(),
 	)?;
 
 	let result = verify_seal(&content_bytes, &cert.seal, ca_mldsa_pk, ca_slhdsa_pk)?;
@@ -278,8 +416,7 @@ fn build_cert_content(
 	issuer_id: &str,
 	not_before: u64,
 	not_after: u64,
-	mldsa_public_key: &[u8],
-	slhdsa_public_key: &[u8],
+	subject_keys: &SubjectKeys,
 ) -> Result<(Vec<u8>, String)> {
 	let content = CertContent {
 		schema_version,
@@ -288,8 +425,9 @@ fn build_cert_content(
 		issuer_id: issuer_id.to_string(),
 		not_before,
 		not_after,
-		mldsa_public_key: mldsa_public_key.to_vec(),
-		slhdsa_public_key: slhdsa_public_key.to_vec(),
+		mldsa_public_key: subject_keys.mldsa_public_key.clone(),
+		slhdsa_public_key: subject_keys.slhdsa_public_key.clone(),
+		concealment: subject_keys.concealment.clone(),
 	};
 
 	let bytes = postcard::to_allocvec(&content)

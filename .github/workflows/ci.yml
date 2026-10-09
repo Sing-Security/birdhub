@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Stable, not the nightly the Dockerfile pins: the dependency
+      # prereleases are prerelease *versions*, not nightly-only features, and
+      # the suite compiling on both is a fact worth keeping.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      # Birdhub's own files only. `cargo fmt` would also walk the vendored
+      # `crates/temper`, and reformatting a copy of another tree is how the
+      # vendoring check starts failing for reasons nobody reads.
+      - name: Format
+        run: rustfmt --check --edition 2021 src/*.rs
+
+      # Note: `scripts/sync-temper.sh --check` is not run here — it compares
+      # against a CrucibleOS checkout, which this repository's CI does not
+      # have. Run it where both trees exist, before tagging a release.

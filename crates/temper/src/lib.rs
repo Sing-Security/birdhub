@@ -19,6 +19,9 @@ pub mod entropy;
 pub mod entropy_source;
 pub mod error;
 
+#[cfg(feature = "keychain")]
+pub mod keychain;
+
 #[cfg(feature = "signatures")]
 pub mod seal;
 
@@ -28,13 +31,73 @@ pub mod ca;
 #[cfg(feature = "envelope")]
 pub mod envelope;
 
-#[cfg(feature = "std")]
-pub mod plugins;
+#[cfg(feature = "envelope")]
+pub mod handshake;
+
+// The record layer for the authenticated session protocol. `session`
+// implies `envelope`, so the AEAD underneath is always present when this
+// compiles; the handshake protocol itself lands with the `session` module.
+#[cfg(feature = "session")]
+pub mod record;
+
+// The three-flight authenticated session protocol: transcript-signed mutual
+// authentication over the bare handshake with both peers' identities concealed,
+// peer policies, and an optional stateless anti-DoS cookie.
+#[cfg(feature = "session")]
+pub mod session;
+
+// Stateless anti-DoS cookie for the session handshake. Separate from `session` for
+// the same reason `replay` is: it needs a carrier-supplied peer tag and a
+// clock, neither of which belongs in a pure state machine.
+#[cfg(feature = "session")]
+pub mod session_cookie;
+
+// Responder-side anti-replay state for flight 1. Lives beside `session`
+// because it is the piece of that state machine the module deliberately does
+// not keep: the handshake itself is stateless between calls, so the memory
+// a responder needs to refuse a repeat is the caller's, and this is a shape
+// for it.
+#[cfg(feature = "session")]
+pub mod replay;
+
+// std + tokio only; `transport` implies both. The framing and client/server
+// complete the handshake above, so the module sits next to it.
+#[cfg(feature = "transport")]
+pub mod transport;
+
+// There was a `plugins` module here. It was a placeholder for dynamically
+// loading `CryptoProvider` implementations from shared libraries, and it was
+// entirely inert: `load_provider` returned an error unconditionally and
+// `discover_providers` returned an empty vector, with two tests whose only
+// job was to pin that inaction. A published symbol named `load_provider`
+// that can never load a provider reads as a capability and is not one, so
+// it is gone until something implements it. Static providers via
+// `set_crypto_provider` remain the supported path.
 
 #[cfg(feature = "hardware_example")]
 pub mod hardware_example;
 
-#[cfg(test)]
+// Private: stub surface for feature-gated-out modules, re-exported below at
+// the crate-root paths it occupied before the move.
+mod stubs;
+
+// Private: no_std getrandom registration. The cfg matches the item-level cfgs
+// inside, so `std` builds carry no module and no registration at all.
+#[cfg(not(feature = "std"))]
+mod getrandom_custom;
+
+// The statistical suites report their results, which only means something with
+// a stdout. Under no_std these expand to a no-op so the assertions — the part
+// that can actually fail — still run. Declared before the modules below, since
+// `macro_rules!` scoping is textual.
+#[cfg(all(test, not(feature = "std")))]
+macro_rules! println {
+	($($arg:tt)*) => {
+		let _ = format_args!($($arg)*);
+	};
+}
+
+#[cfg(all(test, feature = "alloc"))]
 #[path = "entropy_tests.rs"]
 mod entropy_tests;
 
@@ -50,16 +113,31 @@ mod ca_tests;
 #[path = "envelope_tests.rs"]
 mod envelope_tests;
 
-// endregion: --- Modules
+// Functional tests for the flights: round trips, concealment, the cookie
+// gate, version dispatch, and a tamper case per field.
+#[cfg(all(test, feature = "session"))]
+#[path = "session_tests.rs"]
+mod session_tests;
 
-// region:    --- Re-exports
+// Conformance: every transcript/KDF/seal recomputed from PROTOCOL.md's
+// formulas with raw primitives, both protocol roles played by the test against
+// the real implementation, plus a negative control per plausible mis-reading
+// (a seal key folded into H2, a seal key lacking the secret, H2 over the
+// plaintext, a signature by another identity).
+#[cfg(all(test, feature = "session"))]
+#[path = "session_math_tests.rs"]
+mod session_math_tests;
+
+// Golden bytes + property round-trips for the six frozen serialization types.
+// Declared under `signatures` (the base of the envelope stack); the envelope
+// types inside are feature-gated individually.
+#[cfg(all(test, feature = "signatures"))]
+#[path = "frozen_tests.rs"]
+mod frozen_tests;
 
 pub use entropy::{EntropyHealth, TemperEntropy};
 pub use entropy_source::{EntropyError, EntropySource};
 pub use error::{Error, Result};
-
-#[cfg(feature = "alloc")]
-use alloc::vec::Vec;
 
 #[cfg(feature = "signatures")]
 pub use crypto_provider::{CryptoProvider, get_crypto_provider, set_crypto_provider};
@@ -72,64 +150,19 @@ pub use seal::{create_seal, generate_keypair, verify_seal};
 #[cfg(feature = "signatures")]
 pub use ca::verify_certificate as verify_cert_with_keys;
 #[cfg(feature = "signatures")]
-pub use ca::{TemperCa, TemperCertificate};
+pub use ca::{ConcealmentBinding, SubjectKeys, TemperCa, TemperCertificate};
 
 // Stub types for when signatures feature is disabled
 #[cfg(not(feature = "signatures"))]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Seal;
-
+pub use stubs::{Seal, SealContext, SignatureBlock, TemperKeypair, VerifyResult};
 #[cfg(not(feature = "signatures"))]
-pub struct SealContext;
-
-#[cfg(not(feature = "signatures"))]
-pub struct SignatureBlock;
-
-#[cfg(not(feature = "signatures"))]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TemperKeypair;
-
-#[cfg(not(feature = "signatures"))]
-#[derive(Debug, Clone)]
-pub struct VerifyResult {
-    pub valid: bool,
-}
-
-#[cfg(not(feature = "signatures"))]
-impl VerifyResult {
-    pub fn is_valid(&self) -> bool {
-        self.valid
-    }
-}
-
-#[cfg(not(feature = "signatures"))]
-pub fn generate_keypair(_rng: &mut TemperEntropy) -> Result<TemperKeypair> {
-    Ok(TemperKeypair)
-}
-
-#[cfg(not(feature = "signatures"))]
-pub fn create_seal(
-    _rng: &mut TemperEntropy,
-    _data: &[u8],
-    _keypair: &impl core::fmt::Debug, // Accept any keypair type
-    _context: &[u8],
-) -> Result<Seal> {
-    Ok(Seal)
-}
-
-#[cfg(not(feature = "signatures"))]
-pub fn verify_seal(
-    _content: &[u8],
-    _seal: &Seal,
-    _mldsa_pk: &[u8],
-    _slhdsa_pk: &[u8],
-) -> Result<VerifyResult> {
-    Ok(VerifyResult { valid: true })
-}
+pub use stubs::{create_seal, generate_keypair, verify_seal};
 
 #[cfg(feature = "hardware_example")]
 pub use hardware_example::HardwareTrng;
 
+#[cfg(feature = "envelope")]
+pub use envelope::{ConcealmentKeypair, ConcealmentPublicKey};
 #[cfg(feature = "envelope")]
 pub use envelope::{Envelope, EnvelopeKeypair, KernelChainEnvelope};
 #[cfg(feature = "envelope")]
@@ -137,131 +170,34 @@ pub use envelope::{authenticated_decapsulate, authenticated_encapsulate};
 #[cfg(feature = "envelope")]
 pub use envelope::{decapsulate, encapsulate, generate_envelope_keypair};
 #[cfg(feature = "envelope")]
-pub use envelope::{
-    kernel_chain_decapsulate, kernel_chain_encapsulate, kernel_chain_extract_secret,
+pub use envelope::{kernel_chain_decapsulate, kernel_chain_encapsulate, kernel_chain_extract_secret};
+
+#[cfg(feature = "session")]
+pub use record::RecordKeys;
+#[cfg(feature = "session")]
+pub use replay::{DEFAULT_REPLAY_CAPACITY, SessionReplayGuard};
+#[cfg(feature = "session")]
+pub use session::{CertValidity, PROTOCOL_VERSION, PeerIdentity, PeerPolicy, SessionSecrets};
+#[cfg(feature = "session")]
+pub use session::{
+	CookieContext, SessionAccept, SessionAcceptBody, SessionChallenge, SessionInit, accept as session_accept,
+	finalize_initiator as session_finalize_initiator, finalize_responder as session_finalize_responder,
+	initiate as session_initiate, peek_version,
 };
+#[cfg(feature = "session")]
+pub use session_cookie::SessionCookie;
 
 // Stub types for when envelope feature is disabled
 #[cfg(not(feature = "envelope"))]
-pub struct Envelope;
-
-#[cfg(not(feature = "envelope"))]
-pub struct KernelChainEnvelope;
-
-#[cfg(not(feature = "envelope"))]
-#[derive(Debug, Clone)]
-pub struct EnvelopeKeypair {
-    #[cfg(feature = "alloc")]
-    pub public_key: alloc::vec::Vec<u8>,
-    #[cfg(not(feature = "alloc"))]
-    pub public_key: (),
-
-    #[cfg(feature = "alloc")]
-    pub private_key: alloc::vec::Vec<u8>,
-    #[cfg(not(feature = "alloc"))]
-    pub private_key: (),
-}
-
+pub use stubs::{Envelope, EnvelopeKeypair, KernelChainEnvelope};
 #[cfg(all(not(feature = "envelope"), feature = "alloc"))]
-pub fn generate_envelope_keypair() -> Result<EnvelopeKeypair> {
-    Ok(EnvelopeKeypair {
-        public_key: alloc::vec::Vec::new(),
-        private_key: alloc::vec::Vec::new(),
-    })
-}
+pub use stubs::{
+	authenticated_decapsulate, authenticated_encapsulate, decapsulate, encapsulate, generate_envelope_keypair,
+	kernel_chain_decapsulate, kernel_chain_encapsulate, kernel_chain_extract_secret,
+};
 
-#[cfg(all(not(feature = "envelope"), feature = "alloc"))]
-pub fn encapsulate(_public_key: &EnvelopeKeypair) -> Result<(Envelope, [u8; 32])> {
-    Ok((Envelope, [0u8; 32]))
-}
+// `encrypt` / `decrypt` used to live here as public no-ops returning their input
+// unchanged. Removed 2026-10-08 — a crypto crate must not export a function
+// named `encrypt` that hands back plaintext. Use the envelope API.
 
-#[cfg(all(not(feature = "envelope"), feature = "alloc"))]
-pub fn decapsulate(_envelope: &Envelope, _secret_key: &EnvelopeKeypair) -> Result<[u8; 32]> {
-    Ok([0u8; 32])
-}
-
-#[cfg(all(not(feature = "envelope"), feature = "alloc"))]
-pub fn authenticated_encapsulate(
-    _public_key: &EnvelopeKeypair,
-    _data: &[u8],
-) -> Result<alloc::vec::Vec<u8>> {
-    Ok(alloc::vec::Vec::new())
-}
-
-#[cfg(all(not(feature = "envelope"), feature = "alloc"))]
-pub fn authenticated_decapsulate(
-    _envelope: &[u8],
-    _secret_key: &EnvelopeKeypair,
-) -> Result<alloc::vec::Vec<u8>> {
-    Ok(alloc::vec::Vec::new())
-}
-
-#[cfg(all(not(feature = "envelope"), feature = "alloc"))]
-pub fn kernel_chain_encapsulate(
-    _rng: &mut TemperEntropy,
-    _plaintext: &[u8],
-    _recipient_keypair: &EnvelopeKeypair,
-    _kernel_keypair: &EnvelopeKeypair,
-) -> Result<KernelChainEnvelope> {
-    Ok(KernelChainEnvelope)
-}
-
-#[cfg(all(not(feature = "envelope"), feature = "alloc"))]
-pub fn kernel_chain_decapsulate(
-    _envelope: &KernelChainEnvelope,
-    _recipient_keypair: &EnvelopeKeypair,
-    _kernel_shared_secret: &[u8; 32],
-) -> Result<alloc::vec::Vec<u8>> {
-    Ok(alloc::vec::Vec::new())
-}
-
-#[cfg(all(not(feature = "envelope"), feature = "alloc"))]
-pub fn kernel_chain_extract_secret(
-    _envelope: &KernelChainEnvelope,
-    _kernel_keypair: &EnvelopeKeypair,
-) -> Result<[u8; 32]> {
-    Ok([0u8; 32])
-}
-
-// endregion: --- Re-exports
-
-// region:    --- Custom getrandom (no_std targets without OS entropy)
-
-/// Custom getrandom implementation for no_std targets.
-///
-/// This is used when building temper with `default-features = false` on targets
-/// that don't have OS entropy (e.g., x86_64-unknown-none bare metal).
-///
-/// **WARNING**: This returns zeros! It should only be used when:
-/// 1. The target has no OS to provide entropy
-/// 2. The caller provides custom entropy sources via `TemperEntropy::from_sources()`
-///
-/// If you're using `TemperEntropy::new()` (std feature), this function is never called
-/// because getrandom uses the OS CSPRNG instead.
-#[cfg(not(feature = "std"))]
-fn custom_getrandom(buf: &mut [u8]) -> core::result::Result<(), getrandom::Error> {
-    // Zero-fill the buffer
-    // This is safe because:
-    // 1. On bare metal (no OS), there's no system entropy source anyway
-    // 2. Users of bare metal must provide custom entropy via from_sources()
-    // 3. The entropy pool mixes this with actual entropy from hardware sources
-    for byte in buf.iter_mut() {
-        *byte = 0;
-    }
-    Ok(())
-}
-
-#[cfg(not(feature = "std"))]
-getrandom::register_custom_getrandom!(custom_getrandom);
-
-// endregion: --- Custom getrandom
-
-#[cfg(feature = "alloc")]
-pub fn encrypt(data: &[u8]) -> Vec<u8> {
-    data.to_vec()
-}
-
-#[cfg(feature = "alloc")]
-pub fn decrypt(data: &[u8]) -> Vec<u8> {
-    data.to_vec()
-}
+// endregion: --- Modules

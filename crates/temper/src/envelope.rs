@@ -45,7 +45,7 @@
 //!
 //! ```no_run
 //! # #[cfg(feature = "envelope")]
-//! # {
+//! # fn main() -> Result<(), temper::Error> {
 //! use temper::{TemperEntropy, envelope::{generate_envelope_keypair, encapsulate, decapsulate}};
 //!
 //! let mut rng = TemperEntropy::from_seed([0x42; 32]);
@@ -57,8 +57,10 @@
 //! let recovered = decapsulate(&envelope, &keypair)?;
 //!
 //! assert_eq!(plaintext, recovered.as_slice());
-//! # Ok::<(), temper::Error>(())
+//! # Ok(())
 //! # }
+//! # #[cfg(not(feature = "envelope"))]
+//! # fn main() {}
 //! ```
 
 #![cfg(feature = "envelope")]
@@ -79,6 +81,10 @@ use chacha20poly1305::{
 	ChaCha20Poly1305, Nonce,
 	aead::{Aead, KeyInit},
 };
+// Only `aead_seal`/`aead_open` carry AAD, and only the session protocol calls
+// them; without it this import is dead in an `envelope`-without-`session` build.
+#[cfg(feature = "session")]
+use chacha20poly1305::aead::Payload;
 use ml_kem::{
 	Ciphertext, Encoded, EncodedSizeUser, KemCore, MlKem1024, MlKem1024Params,
 	kem::{Decapsulate, Encapsulate},
@@ -150,7 +156,6 @@ impl Drop for EnvelopeKeypair {
 	}
 }
 
-// Memory: security fix per problem statement — prevent private key leaks in logs
 impl core::fmt::Debug for EnvelopeKeypair {
 	fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
 		f.debug_struct("EnvelopeKeypair")
@@ -168,7 +173,7 @@ impl core::fmt::Debug for EnvelopeKeypair {
 }
 
 /// Encrypted envelope with hybrid KEM.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Envelope {
 	/// Schema version for future compatibility.
 	pub schema_version: u16,
@@ -219,7 +224,7 @@ pub struct Envelope {
 /// 3. `x25519_ss = X25519.DH(x25519_ephemeral_pk, recipient_x25519_sk)` — Classical
 /// 4. `channel_key = BLAKE3.derive_key("Temper.KernelChain.v1", mlkem_ss_R || mlkem_ss_K || x25519_ss)`
 /// 5. `plaintext = ChaCha20-Poly1305.Decrypt(channel_key, ciphertext)`
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct KernelChainEnvelope {
 	/// Schema version for future compatibility.
 	pub schema_version: u16,
@@ -245,6 +250,155 @@ pub struct KernelChainEnvelope {
 
 // endregion: --- Data Structures
 
+// region:    --- Concealment keys
+
+/// The public half of an envelope keypair, safe to publish and serialize.
+///
+/// Exists so a caller that only holds the public keys can encapsulate to them
+/// without building an [`EnvelopeKeypair`] whose secret vectors are empty.
+/// That partial-literal workaround appears in-tree (a hand-built keypair with
+/// zero-length secrets, kept alive only so the type-checks pass) and it is a
+/// footgun: such a value cannot decapsulate, and nothing about its type says
+/// so. This type carries exactly the public fields and nothing that could be
+/// mistaken for a usable secret.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConcealmentPublicKey {
+	/// Schema version for future compatibility.
+	pub schema_version: u16,
+	/// ML-KEM-1024 public (encapsulation) key.
+	pub mlkem_public_key: Vec<u8>,
+	/// X25519 public key.
+	pub x25519_public_key: Vec<u8>,
+	/// `hex(BLAKE3(mlkem_pk || x25519_pk))` — the envelope keypair's id.
+	pub key_id: String,
+}
+
+impl ConcealmentPublicKey {
+	/// The public half of `keypair`.
+	pub fn from_keypair(keypair: &EnvelopeKeypair) -> Self {
+		Self {
+			schema_version: keypair.schema_version,
+			mlkem_public_key: keypair.mlkem_public_key.clone(),
+			x25519_public_key: keypair.x25519_public_key.clone(),
+			key_id: keypair.key_id.clone(),
+		}
+	}
+
+	/// Rebuild a published key from its parts, deriving the id rather than
+	/// trusting a carried copy.
+	///
+	/// The path in is a certificate's
+	/// [`ConcealmentBinding`](crate::ca::ConcealmentBinding): certified keys
+	/// arrive as two byte strings and an id computed from them is the only
+	/// form that cannot disagree with the certified content.
+	pub fn from_parts(schema_version: u16, mlkem_public_key: Vec<u8>, x25519_public_key: Vec<u8>) -> Self {
+		let key_id = concealment_key_id(&mlkem_public_key, &x25519_public_key);
+		Self {
+			schema_version,
+			mlkem_public_key,
+			x25519_public_key,
+			key_id,
+		}
+	}
+
+	/// Encapsulate `plaintext` to these public keys. Equivalent to
+	/// [`encapsulate`] against the matching keypair — the KEM work does not
+	/// touch a secret key.
+	pub fn encapsulate(&self, rng: &mut TemperEntropy, plaintext: &[u8]) -> Result<Envelope> {
+		encapsulate_to(rng, plaintext, &self.mlkem_public_key, &self.x25519_public_key)
+	}
+}
+
+/// `hex(BLAKE3(mlkem_pk || x25519_pk))` — the one place the concealment key
+/// id is defined.
+///
+/// [`generate_envelope_keypair`] stamps this id onto a fresh keypair, and
+/// [`ConcealmentPublicKey::from_parts`] recomputes it when a key is rebuilt
+/// from certified parts. Two copies of this derivation would be a silent
+/// disagreement waiting to happen: same keys, different ids, and the
+/// consistency check that compares them reporting a lie.
+fn concealment_key_id(mlkem_public_key: &[u8], x25519_public_key: &[u8]) -> String {
+	let mut hasher = blake3::Hasher::new();
+	hasher.update(mlkem_public_key);
+	hasher.update(x25519_public_key);
+	hex::encode(hasher.finalize().as_bytes())
+}
+
+/// A full concealment keypair: the secret half that opens what the public half
+/// seals.
+///
+/// A thin wrapper over [`EnvelopeKeypair`], introduced so the role reads at
+/// the call site (`ConcealmentKeypair::generate` / `decapsulate`) and so the
+/// secret-bearing type is never the one that gets serialized onto the wire —
+/// only [`ConcealmentPublicKey`] is `serde`.
+pub struct ConcealmentKeypair {
+	inner: EnvelopeKeypair,
+}
+
+impl ConcealmentKeypair {
+	/// Generate a fresh concealment keypair from `rng`.
+	pub fn generate(rng: &mut TemperEntropy) -> Result<Self> {
+		Ok(Self {
+			inner: generate_envelope_keypair(rng)?,
+		})
+	}
+
+	/// Wrap an existing envelope keypair (e.g. one loaded from storage).
+	pub fn from_keypair(keypair: EnvelopeKeypair) -> Self {
+		Self { inner: keypair }
+	}
+
+	/// The publishable public half.
+	pub fn public(&self) -> ConcealmentPublicKey {
+		ConcealmentPublicKey::from_keypair(&self.inner)
+	}
+
+	/// Open an envelope that was sealed to this keypair's public half.
+	pub fn decapsulate(&self, envelope: &Envelope) -> Result<Vec<u8>> {
+		decapsulate(envelope, &self.inner)
+	}
+}
+
+/// ChaCha20-Poly1305 under a raw key with associated data, nonce **all zero**.
+///
+/// # The nonce argument
+///
+/// A zero nonce is only safe when the key is provably used exactly once, which
+/// is the caller's contract and the entire reason this is not a public API. It
+/// serves the seal of a peer identity: each call site derives a key from a
+/// per-session secret, a per-session transcript and a single acceptance, so no
+/// key is ever reached twice. Reusing a (key, nonce) pair with ChaCha20-Poly1305
+/// is catastrophic — it leaks the XOR of the plaintexts and, worse, the
+/// Poly1305 one-time key.
+///
+/// [`encapsulate`] cannot serve this purpose: it is a KEM, it draws a fresh
+/// random nonce, and it carries no AAD. This is the symmetric primitive built
+/// to the same AEAD; callers get confidentiality and integrity under a key
+/// they already hold, not a key transport.
+///
+/// `aad` must be a crate-unique domain string, so a ciphertext produced here
+/// can never authenticate under any other AEAD in this crate.
+// Gated on `session`: the only consumer is the session protocol, and an
+// envelope-only build would otherwise carry two dead functions.
+#[cfg(feature = "session")]
+pub(crate) fn aead_seal(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+	let cipher = ChaCha20Poly1305::new(key.into());
+	cipher
+		.encrypt(Nonce::from_slice(&[0u8; NONCE_SIZE]), Payload { msg: plaintext, aad })
+		.map_err(|_| Error::CryptoError("ChaCha20-Poly1305 seal failed".into()))
+}
+
+/// Open a ciphertext produced by [`aead_seal`] under the same key and AAD.
+#[cfg(feature = "session")]
+pub(crate) fn aead_open(key: &[u8; 32], aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+	let cipher = ChaCha20Poly1305::new(key.into());
+	cipher
+		.decrypt(Nonce::from_slice(&[0u8; NONCE_SIZE]), Payload { msg: ciphertext, aad })
+		.map_err(|_| Error::CryptoError("ChaCha20-Poly1305 open failed (authentication tag mismatch)".into()))
+}
+
+// endregion: --- Concealment keys
+
 // region:    --- Public API
 
 /// Generate an envelope keypair.
@@ -267,11 +421,7 @@ pub fn generate_envelope_keypair(rng: &mut TemperEntropy) -> Result<EnvelopeKeyp
 	// Generate X25519 keypair
 	let (x25519_sk, x25519_pk) = x25519_keygen(rng);
 
-	// Compute key ID: BLAKE3(mlkem_pk || x25519_pk)
-	let mut hasher = blake3::Hasher::new();
-	hasher.update(&mlkem_ek_bytes);
-	hasher.update(&x25519_pk);
-	let key_id = hex::encode(hasher.finalize().as_bytes());
+	let key_id = concealment_key_id(&mlkem_ek_bytes, &x25519_pk);
 
 	Ok(EnvelopeKeypair {
 		schema_version: SCHEMA_VERSION,
@@ -295,10 +445,23 @@ pub fn generate_envelope_keypair(rng: &mut TemperEntropy) -> Result<EnvelopeKeyp
 ///
 /// An `Envelope` containing the encrypted data with hybrid KEM.
 pub fn encapsulate(rng: &mut TemperEntropy, plaintext: &[u8], keypair: &EnvelopeKeypair) -> Result<Envelope> {
+	encapsulate_to(rng, plaintext, &keypair.mlkem_public_key, &keypair.x25519_public_key)
+}
+
+/// Encapsulate to a raw public half — the shared body of [`encapsulate`] and
+/// [`ConcealmentPublicKey::encapsulate`].
+///
+/// Takes the two public keys directly so a caller holding only the public
+/// half never has to fabricate an `EnvelopeKeypair` with empty secret vectors
+/// just to get a function to accept it.
+fn encapsulate_to(
+	rng: &mut TemperEntropy,
+	plaintext: &[u8],
+	mlkem_public_key: &[u8],
+	x25519_public_key: &[u8],
+) -> Result<Envelope> {
 	// Reconstruct ML-KEM encapsulation key from bytes
-	let mlkem_ek_encoded: &Encoded<ml_kem::kem::EncapsulationKey<MlKem1024Params>> = keypair
-		.mlkem_public_key
-		.as_slice()
+	let mlkem_ek_encoded: &Encoded<ml_kem::kem::EncapsulationKey<MlKem1024Params>> = mlkem_public_key
 		.try_into()
 		.map_err(|_| Error::CryptoError("Invalid ML-KEM public key bytes".into()))?;
 	let mlkem_ek = ml_kem::kem::EncapsulationKey::<MlKem1024Params>::from_bytes(mlkem_ek_encoded);
@@ -321,8 +484,7 @@ pub fn encapsulate(rng: &mut TemperEntropy, plaintext: &[u8], keypair: &Envelope
 			.map_err(|_| Error::CryptoError("Invalid X25519 ephemeral key".into()))?,
 	);
 	let x25519_recipient_pk = X25519PublicKey::from(
-		<[u8; 32]>::try_from(keypair.x25519_public_key.as_slice())
-			.map_err(|_| Error::CryptoError("Invalid X25519 public key".into()))?,
+		<[u8; 32]>::try_from(x25519_public_key).map_err(|_| Error::CryptoError("Invalid X25519 public key".into()))?,
 	);
 	let x25519_ss = x25519_ephemeral_sk.diffie_hellman(&x25519_recipient_pk);
 
@@ -481,11 +643,9 @@ pub fn authenticated_encapsulate(
 	use alloc::vec::Vec;
 
 	// 1. Create seal over plaintext
-	// Memory: authenticated envelope per problem statement — sign then encrypt pattern
 	let seal = crate::seal::create_seal(rng, plaintext, sender_keypair, metadata)?;
 
 	// 2. Serialize seal to binary (with compression if available)
-	// Memory: compression optimization per problem statement — DEFLATE reduces SLH-DSA size by 30-50%
 	#[cfg(feature = "compression")]
 	let seal_bytes = seal.to_compressed_bytes()?;
 
@@ -542,7 +702,6 @@ pub fn authenticated_decapsulate(
 	sender_slhdsa_pk: &[u8],
 ) -> Result<(Vec<u8>, crate::seal::Seal)> {
 	// 1. Decrypt the envelope
-	// Memory: authenticated envelope per problem statement — decrypt then verify pattern
 	let authenticated_payload = decapsulate(envelope, recipient_keypair)?;
 
 	// 2. Parse authenticated payload
@@ -567,7 +726,6 @@ pub fn authenticated_decapsulate(
 	let plaintext = &authenticated_payload[4 + seal_length..];
 
 	// 3. Deserialize seal (with decompression if available)
-	// Memory: compression optimization per problem statement — decompress then deserialize
 	#[cfg(feature = "compression")]
 	let seal = crate::seal::Seal::from_compressed_bytes(seal_bytes)?;
 

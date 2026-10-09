@@ -6,6 +6,8 @@ use derive_more::{Display, From};
 
 #[cfg(feature = "alloc")]
 use alloc::string::String;
+#[cfg(feature = "alloc")]
+use alloc::string::ToString;
 
 /// Result type alias using Temper's Error type.
 pub type Result<T> = core::result::Result<T, Error>;
@@ -57,16 +59,59 @@ pub enum Error {
 
 	/// Compression or decompression failed
 	Compression(String),
-	// endregion: --- Serialization Errors
+	// endregion:    --- Serialization Errors
+
+	// region:    --- Protocol Errors
+	/// Protocol-level failure: version mismatch, identity or policy
+	/// rejection, failed handshake confirmation, or a record that did not
+	/// authenticate (bad tag, replayed or out-of-order sequence). Distinct
+	/// from [`Error::CryptoError`] so callers can tell a peer's protocol
+	/// behaviour apart from a local implementation fault.
+	Protocol(String),
+	// endregion:    --- Protocol Errors
+
+	// region:    --- Transport Errors
+	/// Network, framing, or stream I/O failure. Only constructible with the
+	/// `transport` feature (which implies `std`), so no_std configurations
+	/// carry the exact same `Error` shape they had before the feature
+	/// existed.
+	#[cfg(feature = "transport")]
+	Io(std::io::Error),
+	// endregion: --- Transport Errors
 }
 
-/// Implement std::error::Error trait when std feature is enabled.
-#[cfg(feature = "std")]
-impl std::error::Error for Error {}
+// region:    --- Custom
 
 impl Error {
 	/// Create a custom error with a message.
 	pub fn custom(msg: impl Into<String>) -> Self {
 		Self::Custom(msg.into())
 	}
+
+	/// Create a custom error from any [`core::error::Error`].
+	pub fn custom_from_err(err: impl core::error::Error) -> Self {
+		Self::custom(err.to_string())
+	}
 }
+
+// endregion: --- Custom
+
+// region:    --- Transport
+
+// The one external error type, cfg'd with its only producer (transport
+// frames). A manual impl rather than a derive_more `#[from]`: an explicit
+// `#[cfg]` on both halves of the pair cannot drift apart.
+#[cfg(feature = "transport")]
+impl From<std::io::Error> for Error {
+	fn from(err: std::io::Error) -> Self {
+		Self::Io(err)
+	}
+}
+
+// endregion: --- Transport
+
+// region:    --- Error Boilerplate
+
+impl core::error::Error for Error {}
+
+// endregion: --- Error Boilerplate

@@ -1,67 +1,80 @@
 # ==============================================================================
-# VISP Network Agent: Docker Compose Test Environment
+# birdhub — four containers: an enroll step, a hub, a client, an origin
 # ==============================================================================
-# This environment orchestrates a full Identity (NetBird Mock) -> Transport (Temper)
-# -> Routing (Nftables) flow between a Hub and a Client container.
 #
-# Requirements:
-# - The containers require NET_ADMIN capability for nftables and routing.
-# - The mock-netbird.sh script provides simulated identity for the handshake.
-# ==============================================================================
-
-version: "3.8"
+#   docker compose up --build
+#   curl -s localhost:1080/          # traverses the tunnel, both directions
+#
+# `init` runs `scripts/enroll-demo.sh` once: a CA, two identities, two
+# certificates, all into the shared `birdhub-keys` volume. Everything after it
+# verifies what that step produced — the hub and client both refuse to start
+# on a certificate that does not chain to `ca.pub`, and the client also
+# requires the hub's certificate to be byte-identical to the `hub.cert` it
+# holds. `docker compose up` again reuses the enrollment; delete the volume to
+# start a new fleet.
+#
+# No `cap_add`, no `privileged`, no `/dev/net/tun`. Identity is a certificate,
+# the tunnel is an ordinary TCP connection, and authorization is the hub's
+# grant table — so this runs the same on Docker Desktop for Windows and macOS
+# as on Linux. Nothing about the host network stack is touched.
 
 services:
-  # --- VISP HUB (Server Node) ---
-  hub-test:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: hub-test
-    hostname: hub-node
-    cap_add:
-      - NET_ADMIN
-    environment:
-      - RUST_LOG=info
-      - NETBIRD_IP=100.64.0.1
-      - NETBIRD_HOSTNAME=hub.netbird.cloud
+  # --- Run once: enroll the fleet. -------------------------------------------
+  init:
+    build: .
+    entrypoint: ["/bin/sh", "/usr/local/share/birdhub/enroll-demo.sh"]
     volumes:
-      - ./hub-config.toml:/etc/birdhub/config.toml:ro
-    networks:
-      visp-mesh:
-        ipv4_address: 100.64.0.10
-    ports:
-      - "8080:8080" # Control Plane (Auth API)
-      - "8388:8388" # Data Plane (Temper Transport)
+      - birdhub-keys:/etc/birdhub/keys
 
-  # --- VISP CLIENT (End Node) ---
-  client-test:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: client-test
-    hostname: client-node
-    cap_add:
-      - NET_ADMIN
-    environment:
-      - RUST_LOG=info
-      - NETBIRD_IP=100.64.0.2
-      - NETBIRD_HOSTNAME=client.netbird.cloud
+  # --- The relay. Terminates sessions, dials granted targets. ----------------
+  hub:
+    build: .
+    command: ["/etc/birdhub/hub-config.toml"]
     volumes:
-      - ./client-config.toml:/etc/birdhub/config.toml:ro
-    networks:
-      visp-mesh:
-        ipv4_address: 100.64.0.20
+      - birdhub-keys:/etc/birdhub/keys
+    ports:
+      - "8388:8388" # data plane — the Temper session
+      # The control API, for the host-side console and scripts. Loopback-only
+      # on the host: the API is unauthenticated, so it must not be reachable
+      # from the LAN.
+      - "127.0.0.1:8399:8399"
     depends_on:
-      - hub-test
-    # The client listens locally on 1080 for incoming unencrypted traffic
-    # to tunnel through the Temper transport to the Hub.
-    ports:
-      - "1080:1080"
+      init:
+        condition: service_completed_successfully
 
-networks:
-  visp-mesh:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 100.64.0.0/16
+  # --- The tunnel. Binds a local port, carries it to the hub. ----------------
+  client:
+    build: .
+    command: ["/etc/birdhub/client-config.toml"]
+    volumes:
+      # The same volume `init` wrote into. In a real deployment an operator
+      # carries `ca.pub`, `hub.cert` and the node's own certificate across by
+      # hand — the CA is the trust anchor precisely because it is *not*
+      # reachable from the nodes; a shared volume stands in for that here.
+      # Read the files, do not `docker cp` them around.
+      - birdhub-keys:/etc/birdhub/keys
+    ports:
+      - "1080:1080" # the plaintext end of the tunnel
+    depends_on:
+      hub:
+        condition: service_started
+
+  # --- Something to tunnel to. ------------------------------------------------
+  # The client's `forward_to` and the hub's grant name this host, so the demo
+  # needs no internet access and no external service: `curl localhost:1080/`
+  # reaches this listing through the session.
+  origin:
+    image: busybox:latest
+    # A page to fetch through the tunnel, so the demo's reply is the origin's
+    # own words rather than a 404 or a directory listing. The docroot exists
+    # only inside this container; the tunnel is what carries it out.
+    command:
+      - sh
+      - -c
+      - mkdir -p /www && echo 'hello through the tunnel' > /www/index.html && exec httpd -f -v -p 80 -h /www
+
+volumes:
+  # Holds the CA key, both identities, and both certificates. Losing it costs
+  # the fleet its past: the CA key cannot reissue for the same keys, and a
+  # regenerated identity is a different node wearing the same name.
+  birdhub-keys:

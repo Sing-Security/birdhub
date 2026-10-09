@@ -1,65 +1,67 @@
 # ==============================================================================
-# Build Stage
+# birdhub — one image, two roles
 # ==============================================================================
-FROM rustlang/rust:nightly-bookworm-slim AS builder
+#
+# There is one image and two containers (`docker compose up`): a hub and a
+# client. They are the same binary reading different configs, because the two
+# roles share every part of the crypto and differ only in which end of the
+# session they drive.
+#
+# The image needs nothing from the host. No `NET_ADMIN`, no `/dev/net/tun`, no
+# nftables, no routing table surgery — the tunnel is a TCP connection carrying
+# one Temper session, and the destination is named inside it. That is what
+# makes the same compose file work on Linux, macOS and Windows: it never asks
+# Docker for a capability those platforms grant differently.
 
-# Install system build dependencies
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+# ------------------------------------------------------------------------------
+# Build
+# ------------------------------------------------------------------------------
+FROM rustlang/rust:nightly-bookworm-slim AS builder
 
 WORKDIR /usr/src/birdhub
 
-# Copy the entire project context at once to ensure workspace members
-# and their relative paths (like crates/temper) are correctly resolved
-COPY . .
+# The workspace is one package plus the vendored `crates/temper`, and
+# `Cargo.lock` is committed, so `--locked` is meaningful: the image either
+# builds the exact dependency tree that was tested, or it fails loudly.
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY src ./src
 
-# Build the release binary
-RUN cargo build --release
+# temper is edition 2024 with RustCrypto prereleases; the pinned nightly is the
+# toolchain it is developed against, and the image tracks it deliberately.
+RUN cargo build --release --locked --bin birdhub
 
-# ==============================================================================
-# Runtime Stage
-# ==============================================================================
+# ------------------------------------------------------------------------------
+# Runtime
+# ------------------------------------------------------------------------------
 FROM debian:bookworm-slim
 
-# Install runtime dependencies:
-# - nftables: Required for NftManager to apply firewall rules
-# - iproute2: Required for RouteManager to manipulate routing tables
-# - ca-certificates: Required for secure connections to NetBird/Hub APIs
-# - procps: For general process management/debugging
-RUN apt-get update && apt-get install -y \
-    nftables \
-    iproute2 \
-    ca-certificates \
-    procps \
-    && rm -rf /var/lib/apt/lists/*
+# Env features only — nothing here links a C library, so there is no runtime
+# dependency beyond libc and no package to install.
 
-# Create necessary directories for the agent's operations
-# src/dns.rs expects /etc/unbound/unbound.conf.d/ to exist for writing configs
-RUN mkdir -p /etc/unbound/unbound.conf.d/ /etc/birdhub
+# Unprivileged, and a fixed uid so a bind-mounted key directory keeps working
+# across hosts.
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin birdhub \
+    && mkdir -p /etc/birdhub/keys \
+    && chown -R birdhub:birdhub /etc/birdhub
 
-# Copy the binary from the builder stage
 COPY --from=builder /usr/src/birdhub/target/release/birdhub /usr/local/bin/birdhub
 
-# Set up the multi-call mock script for system binaries.
-# This intercepts calls to netbird, systemctl, nft, and ip to allow
-# running the agent in lightweight containers without real systemd/unbound.
-COPY mock-netbird.sh /usr/local/bin/mock-system
-RUN chmod +x /usr/local/bin/mock-system && \
-    ln -s /usr/local/bin/mock-system /usr/local/bin/netbird && \
-    ln -s /usr/local/bin/mock-system /usr/local/bin/systemctl && \
-    ln -s /usr/local/bin/mock-system /usr/local/bin/nft && \
-    ln -s /usr/local/bin/mock-system /usr/local/bin/ip
+# Both role configs are baked in; compose selects one with `command:`. Nothing
+# is bind-mounted from the host, which is the part that differs most between
+# Docker Desktop on Windows, macOS and Linux.
+COPY --chown=birdhub:birdhub hub-config.toml client-config.toml /etc/birdhub/
 
-# Ensure /usr/local/bin is at the front of PATH so mocks are preferred
-ENV PATH="/usr/local/bin:${PATH}"
+# The demo's enrollment flow, run once by the `init` service. Ships in the
+# image rather than the compose file so `docker compose up` stays a single
+# readable command.
+COPY --chown=birdhub:birdhub scripts/enroll-demo.sh /usr/local/share/birdhub/enroll-demo.sh
 
+# The key directory is the one thing that must outlive the container: a node's
+# identity is its keypair, and regenerating it changes who the node is.
+VOLUME ["/etc/birdhub/keys"]
+
+USER birdhub
 WORKDIR /etc/birdhub
-
-# Labels for the image
-LABEL org.opencontainers.image.source="https://github.com/visp-network/birdhub"
-LABEL org.opencontainers.image.description="VISP Network Agent - Identity, Transport, and Routing Controller"
-
-# Set the entrypoint to the birdhub binary
 ENTRYPOINT ["birdhub"]
+CMD ["/etc/birdhub/hub-config.toml"]

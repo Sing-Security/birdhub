@@ -8,8 +8,8 @@
 //! # Implementation Status
 //!
 //! ✅ **Complete and tested** — All PQC primitives integrated with RustCrypto libraries:
-//! - ML-DSA-65 (v0.1.0-rc.7): Lattice-based, NIST Level 3, Module-LWE hardness
-//! - SLH-DSA-SHA2-128f (v0.2.0-rc.4): Hash-based, NIST Level 5, stateless signatures, fast variant
+//! - ML-DSA-65 (v0.1.0-rc.7): Lattice-based, NIST Category 3, Module-LWE hardness
+//! - SLH-DSA-SHA2-128f (v0.2.0-rc.4): Hash-based, NIST Category 1, stateless signatures, fast variant
 //! - DEFLATE compression: Optional size reduction for network transmission and embedded storage
 //!
 //! # Protocol
@@ -47,6 +47,8 @@
 //! # Example
 //!
 //! ```no_run
+//! # extern crate alloc;
+//! # fn main() -> Result<(), temper::Error> {
 //! use temper::{TemperEntropy, generate_keypair, create_seal, verify_seal};
 //! use alloc::collections::BTreeMap;
 //!
@@ -57,7 +59,9 @@
 //! let seal = create_seal(&mut rng, content, &keypair, BTreeMap::new())?;
 //!
 //! // Optional: compress for network transmission
+//! # #[cfg(feature = "compression")]
 //! let compressed = seal.to_compressed_bytes()?;
+//! # #[cfg(feature = "compression")]
 //! let seal = temper::seal::Seal::from_compressed_bytes(&compressed)?;
 //!
 //! let result = verify_seal(
@@ -68,8 +72,15 @@
 //! )?;
 //!
 //! assert!(result.valid); // All checks passed
-//! # Ok::<(), temper::Error>(())
+//! # Ok(())
+//! # }
 //! ```
+//!
+//! The two compression lines are individually gated because
+//! `to_compressed_bytes` needs the `compression` feature: without it the
+//! example still compile-checks the whole seal path, and with it the
+//! compression round trip is checked too. `extern crate alloc` is explicit
+//! because a doc example is its own crate and has no extern prelude.
 
 #[cfg(feature = "alloc")]
 use alloc::string::{String, ToString};
@@ -145,7 +156,6 @@ impl Drop for TemperKeypair {
 	}
 }
 
-// Memory: security fix per problem statement — prevent private key leaks in logs
 impl core::fmt::Debug for TemperKeypair {
 	fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
 		f.debug_struct("TemperKeypair")
@@ -164,7 +174,7 @@ impl core::fmt::Debug for TemperKeypair {
 }
 
 /// Complete seal binding a content hash to dual quantum-safe signatures.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Seal {
 	/// Schema version for future compatibility.
 	pub schema_version: u16,
@@ -262,7 +272,7 @@ impl Seal {
 }
 
 /// A single signature with metadata.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SignatureBlock {
 	/// Algorithm name (e.g., "ML-DSA-65", "SLH-DSA").
 	pub algorithm: String,
@@ -275,7 +285,7 @@ pub struct SignatureBlock {
 }
 
 /// Context information for a seal.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SealContext {
 	/// Domain separation string.
 	pub domain: String,
@@ -320,8 +330,8 @@ pub struct VerifyResult {
 // the same protocol-level API.
 //
 // Default provider: CPU-based RustCrypto implementations (see crypto_provider::cpu)
-// - ML-DSA-65: FIPS 204, lattice-based, NIST Level 3
-// - SLH-DSA-SHA2-128f: FIPS 205, hash-based, NIST Level 5 (fast variant)
+// - ML-DSA-65: FIPS 204, lattice-based, NIST Category 3
+// - SLH-DSA-SHA2-128f: FIPS 205, hash-based, NIST Category 1 (fast variant)
 //
 // Custom providers can be registered via set_crypto_provider() for hardware acceleration.
 
@@ -350,8 +360,7 @@ fn compute_content_hash(content: &[u8]) -> blake3::Hash {
 			const CHUNK_SIZE: usize = 256 * 1024; // 256 KiB chunks
 
 			// Process chunks in parallel
-			let chunk_hashes: Vec<blake3::Hash> =
-				content.par_chunks(CHUNK_SIZE).map(|chunk| blake3::hash(chunk)).collect();
+			let chunk_hashes: Vec<blake3::Hash> = content.par_chunks(CHUNK_SIZE).map(blake3::hash).collect();
 
 			// Combine chunk hashes into final hash
 			let mut hasher = blake3::Hasher::new();
@@ -381,7 +390,6 @@ fn compute_content_hash(content: &[u8]) -> blake3::Hash {
 ///
 /// A new `TemperKeypair` containing both ML-DSA-65 and SLH-DSA keys.
 pub fn generate_keypair(rng: &mut TemperEntropy, signer_id: &str) -> Result<TemperKeypair> {
-	// Memory: crypto provider abstraction — delegate to pluggable provider
 	let provider = get_crypto_provider();
 
 	// Generate ML-DSA-65 keypair
@@ -426,7 +434,6 @@ pub fn create_seal(
 	metadata: BTreeMap<String, String>,
 ) -> Result<Seal> {
 	// Compute content hash (uses parallel hashing for large content when blake3_parallel is enabled)
-	// Memory: performance optimization per problem statement — automatic parallelization
 	let content_hash_bytes = compute_content_hash(content);
 	let content_hash = hex::encode(content_hash_bytes.as_bytes());
 
@@ -441,20 +448,16 @@ pub fn create_seal(
 	};
 
 	// Construct binding: hex(content_hash) || postcard(context)
-	// Memory: postcard replacement per problem statement — compact binary for embedded
 	let context_bytes = postcard::to_allocvec(&context)
 		.map_err(|e| Error::Serialization(format!("Failed to serialize context: {}", e)))?;
 
-	// Memory: pre-sized Vec allocation per problem statement — eliminates reallocation
 	let mut binding = Vec::with_capacity(content_hash.len() + context_bytes.len());
 	binding.extend_from_slice(content_hash.as_bytes());
 	binding.extend_from_slice(&context_bytes);
 
-	// Memory: crypto provider abstraction — delegate to pluggable provider
 	let provider = get_crypto_provider();
 
 	// Sign with ML-DSA-65 (primary)
-	// Memory: signature optimization per problem statement — store raw bytes instead of hex
 	let primary_sig = provider.mldsa_sign(&keypair.mldsa_secret_key, &binding, rng)?;
 	let primary_key_id = hex::encode(blake3::hash(&keypair.mldsa_public_key).as_bytes());
 	let primary = SignatureBlock {
@@ -464,7 +467,6 @@ pub fn create_seal(
 	};
 
 	// Sign with SLH-DSA (backup)
-	// Memory: signature optimization per problem statement — store raw bytes instead of hex
 	let backup_sig = provider.slhdsa_sign(&keypair.slhdsa_secret_key, &binding, rng)?;
 	let backup_key_id = hex::encode(blake3::hash(&keypair.slhdsa_public_key).as_bytes());
 	let backup = SignatureBlock {
@@ -474,8 +476,6 @@ pub fn create_seal(
 	};
 
 	// Compute seal ID by hashing components directly (eliminates ~22KB of clones)
-	// Memory: direct BLAKE3 hashing per problem statement — eliminates temp_seal serialization
-	// Memory: signature optimization — signatures are now Vec<u8>, hash bytes directly
 	let mut seal_id_hasher = blake3::Hasher::new();
 	seal_id_hasher.update(&SCHEMA_VERSION.to_le_bytes());
 	seal_id_hasher.update(content_hash.as_bytes());
@@ -513,30 +513,24 @@ pub fn create_seal(
 /// `VerifyResult` with individual check results and overall validity.
 pub fn verify_seal(content: &[u8], seal: &Seal, mldsa_pk: &[u8], slhdsa_pk: &[u8]) -> Result<VerifyResult> {
 	// Check content hash (uses parallel hashing for large content when blake3_parallel is enabled)
-	// Memory: performance optimization per problem statement — automatic parallelization
 	let actual_hash_bytes = compute_content_hash(content);
 	let actual_hash = hex::encode(actual_hash_bytes.as_bytes());
 	let content_hash_valid = actual_hash == seal.content_hash;
 
 	// Reconstruct binding
-	// Memory: postcard replacement per problem statement — must match create_seal
 	let context_bytes = postcard::to_allocvec(&seal.context)
 		.map_err(|e| Error::Serialization(format!("Failed to serialize context: {}", e)))?;
 
-	// Memory: pre-sized Vec allocation per problem statement — eliminates reallocation
 	let mut binding = Vec::with_capacity(seal.content_hash.len() + context_bytes.len());
 	binding.extend_from_slice(seal.content_hash.as_bytes());
 	binding.extend_from_slice(&context_bytes);
 
-	// Memory: crypto provider abstraction — delegate to pluggable provider
 	let provider = get_crypto_provider();
 
 	// Verify primary signature (ML-DSA-65)
-	// Memory: signature optimization per problem statement — signatures are now Vec<u8>
 	let primary_valid = provider.mldsa_verify(mldsa_pk, &binding, &seal.primary.signature);
 
 	// Verify backup signature (SLH-DSA)
-	// Memory: signature optimization per problem statement — signatures are now Vec<u8>
 	let backup_valid = provider.slhdsa_verify(slhdsa_pk, &binding, &seal.backup.signature);
 
 	// Overall validity requires all three checks to pass
@@ -574,7 +568,6 @@ pub fn compress_seal(seal_bytes: &[u8]) -> Result<Vec<u8>> {
 	use flate2::Compression;
 	use flate2::FlushCompress;
 
-	// Memory: alloc pattern per rust-nostd.instructions.md — use alloc::vec::Vec
 	let mut compressor = Compress::new(Compression::best(), false);
 
 	// Estimate output buffer size (worst case: input + overhead)
@@ -613,7 +606,6 @@ pub fn decompress_seal(compressed: &[u8]) -> Result<Vec<u8>> {
 	use flate2::Decompress;
 	use flate2::FlushDecompress;
 
-	// Memory: alloc pattern per rust-nostd.instructions.md — use alloc::vec::Vec
 	let mut decompressor = Decompress::new(false);
 
 	// Estimate output buffer size (assume 3x expansion for compressed data)

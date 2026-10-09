@@ -1,90 +1,102 @@
 [package]
 name = "temper"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2024"
+rust-version = "1.89"
 description = "Temper — Quantum-safe cryptographic protocol with hardened entropy and dual PQC signatures. Fully no_std for embedded."
 license = "Apache-2.0"
 repository = "https://github.com/Sing-Security/temper"
+readme = "README.md"
 keywords = ["cryptography", "post-quantum", "no-std", "embedded", "blake3"]
 categories = ["cryptography", "no-std"]
 
 [lib]
 doctest = false
 
+[lints.rust]
+# `deny`, not the usual `forbid`: the GetRandom syscall path (no_std userspace
+# CBLs) is irreducible inline asm — see src/getrandom_custom.rs, which carries a
+# targeted `#[allow(unsafe_code)]`. `forbid` would delete that path outright.
+unsafe_code = "deny"
+# unused = { level = "allow", priority = -1 } # For exploratory dev.
+
 [features]
 default = ["std", "envelope"]
-std = ["alloc", "blake3/std", "hex/std", "compression"]
+std = ["alloc", "hex/std", "compression"]
 alloc = []  # blake3/pure is now in dependencies section directly
 compression = ["dep:flate2"]
 signatures = ["dep:ml-dsa", "dep:slh-dsa"]
+keychain = []  # CapKeychain + DelegationToken — only requires blake3, already in deps
 
 # Performance features (std only - incompatible with bare-metal)
-blake3_simd = ["std", "blake3/neon", "blake3/prefer_intrinsics"]
+blake3_simd = ["std", ]
 blake3_parallel = ["blake3_simd", "dep:rayon"]
 
 # Hybrid KEM/AEAD (optional, no_std + alloc compatible)
 envelope = ["signatures", "dep:ml-kem", "dep:x25519-dalek", "dep:chacha20poly1305"]
 
+# Authenticated session protocol (no_std + alloc): transcript-signed
+# three-flight handshake over the `handshake` primitives, plus the record
+# layer (`record.rs`) — ChaCha20-Poly1305 with counter nonces. The `ca`
+# module rides in via `signatures` for certificate-based peer policies.
+session = ["envelope"]
+
 # Hardware entropy example (optional, no_std compatible)
 hardware_example = []
 
-[dependencies]
-# -- Cryptography
-blake3 = { version = "1", default-features = false }
-ml-dsa = { version = "0.1.0-rc.7", default-features = false, features = ["zeroize"], optional = true }
-slh-dsa = { version = "0.2.0-rc.4", default-features = false, features = ["zeroize"], optional = true }
+# CrucibleOS userspace entropy: route getrandom to the kernel CSPRNG via the
+# GetRandom (80) syscall. ONLY for userspace CBLs — never enable in the kernel
+# (it emits a ring-3 `syscall`/`svc` instruction). Without this, no_std builds
+# fall back to the zero-fill getrandom stub (deterministic DRBG seeds).
+crucible-user-getrandom = []
 
-# -- Hybrid KEM/AEAD (optional)
+# Network transport (std only): length-prefixed framing ([u32 LE length]
+# [postcard payload]) over tokio's LengthDelimitedCodec, plus a tokio
+# client/server that runs the three session flights and then moves one
+# encrypted record per frame. Opt-in and implies `std` — every no_std
+# configuration of this crate is untouched, and tokio itself is std-only,
+# which is exactly why it lives behind this gate.
+transport = ["std", "session", "dep:tokio", "dep:tokio-util", "dep:futures-util", "dep:bytes"]
+
+[dependencies]
+# -- Encoding
+blake3 = { version = "1", default-features = false }
+ml-dsa = { version = "=0.1.0-rc.7", default-features = false, features = ["zeroize"], optional = true }
+slh-dsa = { version = "0.2.0-rc.4", default-features = false, features = ["zeroize"], optional = true }
 ml-kem = { version = "0.2.2", default-features = false, features = ["zeroize"], optional = true }
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"], optional = true }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"], optional = true }
-
-# -- DRBG
 rand_chacha = { version = "0.3", default-features = false }
 rand_core = { version = "0.6", default-features = false }
-
-# -- Entropy seeding
 getrandom = { version = "0.2", default-features = false, features = ["custom"] }
-
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+zeroize = { version = "1", default-features = false }
 # -- Serialization
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
+# Byte-level views of the repr(C) delegation token without hand-written unsafe.
+zerocopy = { version = "0.8", default-features = false, features = ["derive"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
-
-# -- Concurrency (no_std spinlock)
+# -- Transport
+# Networking stack for the optional `transport` feature: tokio for
+# sockets, tokio-util's LengthDelimitedCodec for the framing, futures-util for
+# the Sink/Stream extensions, bytes for the frame buffers. `rt` + `macros`
+# exist for the module's async tests; the library itself only needs `net`.
+tokio = { version = "1", default-features = false, features = ["net", "io-util", "rt", "macros"], optional = true }
+tokio-util = { version = "0.7", default-features = false, features = ["codec"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"], optional = true }
+bytes = { version = "1", default-features = false, optional = true }
+# -- Concurrency
 spin = "0.9"
-
-# -- Encoding
-hex = { version = "0.4", default-features = false, features = ["alloc"] }
-
-# -- Secure memory
-zeroize = { version = "1", default-features = false }
-
-# -- Error handling (no_std compatible proc-macro)
-derive_more = { version = "2", default-features = false, features = ["from", "display"] }
-
-# -- Parallel processing (optional, std only)
+# -- Parallel processing
 rayon = { version = "1.10", optional = true }
+# -- Others
+derive_more = { version = "2", default-features = false, features = ["from", "display"] }
 
 [dev-dependencies]
 rand = "0.8"
 criterion = { version = "0.5", features = ["html_reports"] }
-
-# Benchmarks
-[[bench]]
-name = "seal_bench"
-harness = false
-required-features = ["std"]
-
-# Examples
-[[example]]
-name = "seal_demo"
-required-features = ["std"]
-
-[[example]]
-name = "crypto_provider_demo"
-required-features = ["std"]
-
-[[example]]
-name = "kernel_chain_demo"
-required-features = ["std", "envelope"]
+# Frozen-layout asserts (DelegationToken ABI) — const-evaluated at test compile.
+static_assertions = "1"
+# Property round-trips for the six frozen serialization types.
+proptest = "1"

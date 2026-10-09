@@ -1,43 +1,89 @@
 # ==============================================================================
-# VISP Client Configuration (Test Environment)
+# birdhub — client
 # ==============================================================================
+#
+# Binds local addresses; every connection it accepts is carried as one stream
+# on this node's single Temper session to the hub, to one fixed destination —
+# a host:port the hub dials, or <subject>/<service> on another node.
+#
+# This machine's papers (the CA machine issues the certificate; see
+# hub-config.toml for the full three-command flow):
+#
+#   birdhub identity export --key /etc/birdhub/keys/client.key --pub client.pub
+#   # on the CA machine:
+#   birdhub ca issue --ca ca.key --identity client.pub --days 365 --out client.cert
+#
+# and `hub.cert` is carried over from the hub. Startup checks all four files
+# before any tunnel binds: this certificate must certify these keys, and both
+# certificates must chain to this CA inside their validity windows.
 
 [app]
 mode = "client"
 
-[exit]
-# Exit Policy Mode. In a test environment, we manually specify the Hub.
-mode = "manual"
-primary = "hub-test"
+[identity]
+# Generated on first start, owner-readable only.
+key_file = "/etc/birdhub/keys/client.key"
+# This name is what the hub looks up in its grants — it comes from the
+# certificate, not from this file, but keeping them equal keeps the config
+# readable next to the grant table.
+name = "laptop.example"
+certificate = "/etc/birdhub/keys/client.cert"
 
-[netbird]
-# Mock environment settings.
-# Identity is provided via the mock-netbird binary in /usr/local/bin.
-interface = "eth0"
-management_url = "http://hub-test:8080" # Pointing to the Hub's control plane
-internal_domain = "client.netbird.cloud"
+[ca]
+# The fleet's trust anchor: the hub's certificate is verified against it
+# during the handshake.
+public = "/etc/birdhub/keys/ca.pub"
 
-[dns]
-internal_zone = "netbird.cloud"
-nameserver_ip = "127.0.0.1"
-
-[watchdog]
-# Slower checks for lightweight container testing
-check_interval_secs = 60
-leak_protection_strict = false
-
-# ==============================================================================
-# Temper Exits (Transport Layer)
-# ==============================================================================
+[peer]
+# Where the hub is. Both are compose service names.
+address = "hub:8388"
+# Path to the hub's certificate.
+#
+# The handshake already checks the hub against `[ca]`, which answers "is this
+# a member of the fleet". This file answers the different question "is this
+# *our* hub": the certificate the hub presents must be byte-identical to this
+# one, so a second valid certificate from the same CA cannot take its place.
+hub_cert = "/etc/birdhub/keys/hub.cert"
 
 [[transports]]
-name = "hub-test"
-# In Docker Compose, 'hub-test' resolves to the hub container's internal IP
-server_address = "hub-test"
-server_port = 8388
-local_port = 1080
-mark = 101 # fwmark for policy routing
+name = "web"
+# Where the tunnel listens, inside this container.
+local_address = "0.0.0.0:1080"
+# What the hub should connect to on this tunnel's behalf. Must appear in this
+# client's `[[grants]]` targets on the hub — exact match, port included —
+# or the hub refuses before dialing anything. The default pairs with the
+# sample grant in hub-config.toml:
+#
+#   curl -s localhost:1080/
+#
+# goes local program → this node → Temper session → hub → origin:80.
+#
+# A `<subject>/<service>` here instead reaches a *peer*'s service: the hub
+# pairs the two nodes, they run their own session inside that pairing, and
+# the serving node checks this node's certificate against its own
+# `[[services]]` clients list. The hub needs a `@peer/<subject>` grant for it.
+forward_to = "origin:80"
 
-[i2p]
-# Disabled for basic networking tests
-enabled = false
+# Services this node *serves* to peers, if any. Each one names what it dials
+# and which certificate subjects may use it; a peer not in `clients` is
+# refused, and an empty list is a config error.
+#
+# The service dials from *this node's* position: `origin:80` is the compose
+# service, resolvable here and nowhere else. That is what the `@peer` split
+# buys — `desktop.example` (the native node in TESTING.md's mixed-fleet
+# walkthrough) reaches this service by name through the hub, without ever
+# being able to resolve, dial, or even name a container address itself.
+[[services]]
+name = "web"
+target = "origin:80"
+clients = ["desktop.example"]
+
+# The local read/write API, same shape as the hub's (see hub-config.toml).
+# Off unless written down; this node has none published in compose, so the
+# section stays commented — enable it when the console manages this node.
+#
+# GET /status /link /transports /services /peers /events
+# POST /link/reconnect
+#
+# [control]
+# address = "127.0.0.1:8399"
