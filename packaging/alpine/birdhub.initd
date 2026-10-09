@@ -1,20 +1,25 @@
 #!/sbin/openrc-run
 
 name="birdhub"
-description="VISP (Virtual ISP) Zero-Trust Overlay Network Agent"
+description="Relay over Temper certificates (hub or client)"
+
+# One config selects the role; birdhub_config in /etc/conf.d/birdhub is a
+# client by default. Point it at hub-config.toml to run a hub.
+: "${birdhub_config:=/etc/birdhub/client-config.toml}"
 
 command="/usr/bin/birdhub"
+command_args="$birdhub_config"
+command_user="birdhub:birdhub"
 command_background=true
 pidfile="/run/${RC_SVCNAME}.pid"
-directory="/etc/birdhub"
+directory="/var/lib/birdhub"
 
 depend() {
-    need net localmount
-    use netbird
-    after netbird firewall
+	need net
+	after firewall
 }
 
 start_pre() {
-    # Ensure the configuration directory exists
-    checkpath -d -m 0755 -o root:root /etc/birdhub
+	checkpath -d -m 0750 -o birdhub:birdhub /etc/birdhub/keys
+	checkpath -d -m 0750 -o birdhub:birdhub /var/lib/birdhub
 }

@@ -1,0 +1,3 @@
+# Config file birdhub is started with. The shipped file is a client; point
+# this at /etc/birdhub/hub-config.toml to run a hub.
+birdhub_config="/etc/birdhub/client-config.toml"

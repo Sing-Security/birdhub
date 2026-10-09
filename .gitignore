@@ -25,3 +25,6 @@ packaging/*/pkg/
 *.rpm
 *.pkg.tar.zst
 *.tar.xz
+
+# Local release builds
+/releases/

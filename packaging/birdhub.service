@@ -1,24 +1,32 @@
 [Unit]
-Description=VISP Network Agent (Birdhub)
-After=network-online.target netbird.service
+Description=birdhub relay (Temper sessions, hub or client)
+After=network-online.target
 Wants=network-online.target
-Requires=netbird.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/birdhub
+# One config selects the role: this file is a client. Swap the argument for
+# /etc/birdhub/hub-config.toml to run a hub.
+ExecStart=/usr/bin/birdhub /etc/birdhub/client-config.toml
 Restart=always
 RestartSec=5
-# Birdhub manipulates nftables and iproute2, so it requires root privileges.
-User=root
-Group=root
 
-# Hardening options
+# No privileges of any kind. The tunnel is an ordinary TCP connection, nothing
+# listens below port 1024 by default, and no device is opened — the netbird,
+# nftables and iproute2 dependencies of the first packaging are gone along with
+# the code that needed them.
+User=birdhub
+Group=birdhub
+StateDirectory=birdhub
+
 NoNewPrivileges=yes
-ProtectSystem=full
+ProtectSystem=strict
 ProtectHome=yes
+PrivateTmp=yes
 RestrictNamespaces=yes
 RestrictRealtime=yes
+# The keys live here and nowhere else the unit can write.
+ReadWritePaths=/etc/birdhub/keys
 
 [Install]
 WantedBy=multi-user.target

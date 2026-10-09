@@ -1,15 +1,17 @@
-# Contributor: VISP Engineering <admin@orbit.lfam.us>
-# Maintainer: VISP Engineering <admin@orbit.lfam.us>
+# Contributor: LFAM Orbit <admin@lfam.us>
+# Maintainer: LFAM Orbit <admin@lfam.us>
 pkgname=birdhub
 pkgver=0.1.0
 pkgrel=0
-pkgdesc="Zero-Trust Virtual ISP agent and Hub control plane"
+pkgdesc="Relay over Temper certificates: hub and client in one binary"
 url="https://orbit.lfam.us"
 arch="x86_64 aarch64"
 license="Proprietary"
-depends="nftables iproute2 netbird"
+# No runtime dependencies: the tunnel is an ordinary TCP connection, and the
+# nftables/iproute2/netbird dependencies of the first packaging are gone along
+# with the code that needed them.
 makedepends="cargo rust"
-source="$pkgname-$pkgver.tar.gz birdhub.initd"
+source="$pkgname-$pkgver.tar.gz birdhub.initd birdhub.confd"
 builddir="$srcdir/$pkgname-$pkgver"
 
 build() {
@@ -25,14 +27,9 @@ check() {
 package() {
 	install -Dm755 target/release/$pkgname "$pkgdir"/usr/bin/$pkgname
 
-	# Create directory for configuration
-	install -d "$pkgdir"/etc/$pkgname
+	install -Dm644 hub-config.toml "$pkgdir"/etc/$pkgname/hub-config.toml
+	install -Dm644 client-config.toml "$pkgdir"/etc/$pkgname/client-config.toml
 
-	# Install default config if present
-	if [ -f "config.toml" ]; then
-		install -Dm644 config.toml "$pkgdir"/etc/$pkgname/config.toml
-	fi
-
-	# Install OpenRC init script
 	install -Dm755 "$srcdir"/birdhub.initd "$pkgdir"/etc/init.d/birdhub
+	install -Dm644 "$srcdir"/birdhub.confd "$pkgdir"/etc/conf.d/birdhub
 }

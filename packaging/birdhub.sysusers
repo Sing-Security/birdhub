@@ -1,0 +1,3 @@
+# birdhub's identity is a file it owns; the service needs no other privilege,
+# so it runs as this user and the key directory is chowned to it.
+u birdhub - "birdhub relay" /var/lib/birdhub

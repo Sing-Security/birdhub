@@ -2,36 +2,43 @@
 pkgname=birdhub
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="VISP (Virtual ISP) Zero-Trust Overlay Network Agent"
+pkgdesc="Relay over Temper certificates: hub and client in one binary"
 arch=('x86_64' 'aarch64')
 url="https://github.com/your-org/birdhub"
 license=('custom:Proprietary')
-depends=('netbird' 'nftables' 'iproute2')
+# No runtime dependencies: the tunnel is an ordinary TCP connection. The
+# netbird/nftables/iproute2 dependencies of the first packaging are gone
+# along with the code that needed them.
+depends=()
 makedepends=('cargo')
-optdepends=('unbound: for split-horizon DNS routing'
-            'i2pd: for anonymous transparent routing')
 source=("${pkgname}-${pkgver}.tar.gz::https://github.com/your-org/birdhub/archive/refs/tags/v${pkgver}.tar.gz")
 sha256sums=('SKIP') # Replace with actual checksum when publishing
 
 build() {
   cd "${pkgname}-${pkgver}"
-  export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
-  cargo build --release --locked --all-features
+  cargo build --release --locked
+}
+
+check() {
+  cd "${pkgname}-${pkgver}"
+  export CARGO_TARGET_DIR=target
+  cargo test --release --locked
 }
 
 package() {
   cd "${pkgname}-${pkgver}"
 
-  # Install the main binary
   install -Dm755 "target/release/${pkgname}" "${pkgdir}/usr/bin/${pkgname}"
 
-  # Install a default config file if provided (or placeholder)
-  install -Dm644 "config.toml" "${pkgdir}/etc/${pkgname}/config.toml"
+  # Both role configs. They reference /etc/birdhub/keys/ for the identity,
+  # certificate and CA files, which enrollment creates; see the header of
+  # each file for the three commands that produce them.
+  install -Dm644 hub-config.toml "${pkgdir}/etc/${pkgname}/hub-config.toml"
+  install -Dm644 client-config.toml "${pkgdir}/etc/${pkgname}/client-config.toml"
 
-  # Install systemd service (Assuming you create one)
   install -Dm644 "packaging/${pkgname}.service" "${pkgdir}/usr/lib/systemd/system/${pkgname}.service"
+  install -Dm644 "packaging/${pkgname}.sysusers" "${pkgdir}/usr/lib/sysusers.d/${pkgname}.conf"
 
-  # Install the proprietary license
   install -Dm644 "LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 }
